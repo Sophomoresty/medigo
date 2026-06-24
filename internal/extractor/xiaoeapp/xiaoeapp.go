@@ -68,6 +68,7 @@ func (x *Xiaoeapp) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 		items = append(items, listed...)
 	}
 	entries := []*extractor.MediaInfo{}
+	blockedReasons := []string{}
 	seen := map[string]bool{}
 	seenItem := map[string]bool{}
 	for _, it := range items {
@@ -76,6 +77,10 @@ func (x *Xiaoeapp) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 		}
 		seenItem[it.id] = true
 		u, extra := resolveItemURL(c, sess, it)
+		if reason := val(extra, "blocked_reason"); reason != "" {
+			blockedReasons = append(blockedReasons, reason)
+			continue
+		}
 		if u == "" || seen[u] {
 			continue
 		}
@@ -83,6 +88,9 @@ func (x *Xiaoeapp) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 		entries = append(entries, media(firstNonEmpty(it.title, it.id), u, extra))
 	}
 	if len(entries) == 0 {
+		if len(blockedReasons) > 0 {
+			return nil, fmt.Errorf("blocked: %s", blockedReasons[0])
+		}
 		return nil, fmt.Errorf("xiaoeapp: no playable URL resolved from course list/detail")
 	}
 	title := "xiaoeapp"
@@ -131,19 +139,31 @@ func fetchCourseList(c *util.Client, sess xeSession) ([]xeItem, error) {
 }
 
 func resolveItemURL(c *util.Client, sess xeSession, it xeItem) (string, map[string]any) {
-	if u := pickURL(it.raw); u != "" {
-		return u, map[string]any{"resource_id": it.id, "resource_type": it.typ, "app_id": it.appID}
-	}
 	if isLiveType(it.typ) {
+		if containsPrivateXiaoeFlow(it.raw) {
+			return "", map[string]any{"blocked_reason": "blocked: needs xiaoe private lookback m3u8 decrypt", "resource_id": it.id, "resource_type": it.typ, "app_id": it.appID}
+		}
+		if u := pickURL(it.raw); u != "" {
+			return u, map[string]any{"resource_id": it.id, "resource_type": it.typ, "app_id": it.appID}
+		}
 		body := map[string]any{"type": "1", "app_id": firstNonEmpty(it.appID, sess.appID), "resource_id": it.id}
 		if it.productID != "" {
 			body["product_id"] = it.productID
 		}
 		if root, err := postAppAPI(c, sess, lookbackURLAPI, body); err == nil && code(root) == "0" {
+			if containsPrivateXiaoeFlow(root["data"]) {
+				return "", map[string]any{"blocked_reason": "blocked: needs xiaoe private lookback m3u8 decrypt", "resource_id": it.id, "resource_type": it.typ, "app_id": it.appID, "api": lookbackURLAPI}
+			}
 			if u := pickURL(root["data"]); u != "" {
 				return u, map[string]any{"resource_id": it.id, "resource_type": it.typ, "app_id": it.appID, "api": lookbackURLAPI}
 			}
 		}
+	}
+	if containsPrivateXiaoeFlow(it.raw) {
+		return "", map[string]any{"blocked_reason": "blocked: needs xiaoe private lookback m3u8 decrypt", "resource_id": it.id, "resource_type": it.typ, "app_id": it.appID}
+	}
+	if u := pickURL(it.raw); u != "" {
+		return u, map[string]any{"resource_id": it.id, "resource_type": it.typ, "app_id": it.appID}
 	}
 	goodsType := goodsType(it.typ)
 	body := map[string]any{"data": map[string]any{"time": 205, "is_show_resourcecount": 1, "hide_view_count": 0, "goods_type": goodsType, "goods_id": it.id}, "content_app_id": "", "app_id": firstNonEmpty(it.appID, sess.appID)}
@@ -158,6 +178,9 @@ func resolveItemURL(c *util.Client, sess xeSession, it xeItem) (string, map[stri
 		return "", nil
 	}
 	data := root["data"]
+	if containsPrivateXiaoeFlow(data) {
+		return "", map[string]any{"blocked_reason": "blocked: needs xiaoe private lookback m3u8 decrypt", "resource_id": it.id, "resource_type": it.typ, "goods_type": goodsType, "api": videoInfoAPI}
+	}
 	if u := pickURL(data); u != "" {
 		return u, map[string]any{"resource_id": it.id, "resource_type": it.typ, "goods_type": goodsType, "api": videoInfoAPI}
 	}
@@ -300,7 +323,7 @@ func itemAvailable(m map[string]any) bool {
 }
 func pickURL(v any) string {
 	for _, m := range mapsUnder(v) {
-		for _, k := range []string{"video_m3u8_url", "video_hls", "video_url", "audio_m3u8_url", "audio_url", "aliveVideoUrl", "aliveVideoMp4Url", "aliveVideoUrlEncrypt", "miniAliveVideoUrl", "aliveReviewUrl", "play_url", "playUrl", "url", "m3u8_url", "file_url", "download_url"} {
+		for _, k := range []string{"video_m3u8_url", "video_hls", "video_url", "audio_m3u8_url", "audio_url", "aliveVideoUrl", "aliveVideoMp4Url", "miniAliveVideoUrl", "aliveReviewUrl", "play_url", "playUrl", "url", "m3u8_url", "file_url", "download_url"} {
 			if u := normalizeURL(val(m, k)); strings.HasPrefix(u, "http") || strings.HasPrefix(u, "//") {
 				return normalizeURL(u)
 			}
@@ -312,7 +335,11 @@ func media(title, u string, extra map[string]any) *extractor.MediaInfo {
 	if title == "" {
 		title = "xiaoeapp_video"
 	}
-	return &extractor.MediaInfo{Site: "xiaoeapp", Title: title, Streams: map[string]extractor.Stream{"default": {Quality: "source", URLs: []string{u}, Format: formatOf(u), Headers: map[string]string{"Referer": "https://www.xiaoeknow.com/"}}}, Extra: extra}
+	stream := extractor.Stream{Quality: "source", URLs: []string{u}, Format: formatOf(u), Headers: map[string]string{"Referer": "https://www.xiaoeknow.com/"}}
+	if strings.Contains(strings.ToLower(stream.Format), "m3u8") {
+		stream.NeedMerge = true
+	}
+	return &extractor.MediaInfo{Site: "xiaoeapp", Title: title, Streams: map[string]extractor.Stream{"default": stream}, Extra: extra}
 }
 func listUnder(v any, key string) []map[string]any {
 	for _, m := range mapsUnder(v) {
@@ -398,4 +425,20 @@ func formatOf(u string) string {
 		return "mp3"
 	}
 	return "mp4"
+}
+
+func containsPrivateXiaoeFlow(v any) bool {
+	for _, m := range mapsUnder(v) {
+		for _, k := range []string{"private_info", "private_m3u8", "aliveVideoUrlEncrypt"} {
+			if s := strings.ToLower(val(m, k)); s != "" && s != "false" && s != "0" && s != "<nil>" {
+				return true
+			}
+		}
+		for _, k := range []string{"url", "video_url", "video_audio_url", "aliveVideoUrlEncrypt"} {
+			if s := strings.ToLower(val(m, k)); strings.Contains(s, "__ba") || strings.Contains(s, "distribute.vod.pri.get") {
+				return true
+			}
+		}
+	}
+	return false
 }

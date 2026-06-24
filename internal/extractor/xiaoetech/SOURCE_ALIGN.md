@@ -45,3 +45,10 @@
 ## 阻塞步骤
 
 无.
+
+## R2 critical follow-up
+
+| 缺口 | 处理结果 |
+|---|---|
+| 多资源类型 endpoint 路由 | `resolveItem` 已拆分 text -> `xe.course.business.get.detail`, book -> `xe.course.business.ebook.info`, document/file -> `xe.course.business.courseware_list.get`, audio -> `xe.course.business.audio.info.get`; column/member/ecourse/train 保持 column items API. |
+| protected live/private lookback | live 分支现在优先检测 `aliveVideoUrlEncrypt`, `private_info`, `private_m3u8`, `__ba`, `distribute.vod.pri.get`; 命中时返回 `blocked: needs private lookback decrypt`, 不再把受保护 m3u8 当作普通 URL. |

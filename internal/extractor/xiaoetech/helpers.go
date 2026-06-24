@@ -68,27 +68,64 @@ func fetchCourseList(c *util.Client, jar http.CookieJar) ([]xetItem, error) {
 }
 
 func resolveItem(c *util.Client, jar http.CookieJar, ctx xetCtx, it xetItem) (string, map[string]any) {
-	if u := firstMediaURL(it.raw); u != "" {
-		return u, map[string]any{"resource_id": it.id, "resource_type": it.typ, "app_id": ctx.appID}
-	}
-	switch normType(firstNonEmpty(ctx.typ, it.typ)) {
+	typ := normType(firstNonEmpty(ctx.typ, it.typ))
+	baseExtra := map[string]any{"resource_id": it.id, "resource_type": typ, "app_id": ctx.appID}
+	switch typ {
 	case "live":
-		if u := liveMediaURL(c, jar, ctx, it.id); u != "" {
-			return u, map[string]any{"resource_id": it.id, "resource_type": "live", "api": "lookback"}
+		if containsPrivateXiaoetechFlow(it.raw) {
+			return "", map[string]any{"blocked_reason": "blocked: needs private lookback decrypt", "resource_id": it.id, "resource_type": "live", "app_id": ctx.appID}
 		}
+		if u, extra := liveMediaURL(c, jar, ctx, it.id); u != "" {
+			for k, v := range extra {
+				baseExtra[k] = v
+			}
+			return u, baseExtra
+		}
+		return "", map[string]any{"blocked_reason": "blocked: needs private lookback decrypt", "resource_id": it.id, "resource_type": "live", "app_id": ctx.appID}
 	case "audio":
 		if u := postDetailURL(c, jar, ctx, it.id, audioURL, pcAudioURL, map[string]string{"bizData[resource_id]": it.id}); u != "" {
 			return u, map[string]any{"resource_id": it.id, "resource_type": "audio", "api": audioURL}
 		}
-	case "text", "book", "document", "column", "bigcolumn", "member", "ecourse", "train":
-		if u := postDetailURL(c, jar, ctx, it.id, infoURL, "", map[string]string{"bizData[resource_id]": it.id}); u != "" {
-			return u, map[string]any{"resource_id": it.id, "resource_type": it.typ, "api": infoURL}
+		return "", map[string]any{"blocked_reason": "blocked: needs audio endpoint resolution", "resource_id": it.id, "resource_type": "audio"}
+	case "text":
+		if u := postDetailURL(c, jar, ctx, it.id, textURL, pcTextURL, map[string]string{"bizData[resource_id]": it.id}); u != "" {
+			return u, map[string]any{"resource_id": it.id, "resource_type": "text", "api": textURL}
 		}
+		return "", map[string]any{"blocked_reason": "blocked: needs text endpoint resolution", "resource_id": it.id, "resource_type": "text"}
+	case "book":
+		if u := postDetailURL(c, jar, ctx, it.id, ebookURL, pcEbookURL, map[string]string{"bizData[resource_id]": it.id}); u != "" {
+			return u, map[string]any{"resource_id": it.id, "resource_type": "book", "api": ebookURL}
+		}
+		return "", map[string]any{"blocked_reason": "blocked: needs ebook endpoint resolution", "resource_id": it.id, "resource_type": "book"}
+	case "document", "file":
+		if u := postDetailURL(c, jar, ctx, it.id, fileURL, pcFileURL, map[string]string{"bizData[resource_id]": it.id}); u != "" {
+			return u, map[string]any{"resource_id": it.id, "resource_type": typ, "api": fileURL}
+		}
+		return "", map[string]any{"blocked_reason": "blocked: needs file endpoint resolution", "resource_id": it.id, "resource_type": typ}
+	case "column", "bigcolumn", "member", "ecourse", "train":
+		if u := postDetailURL(c, jar, ctx, it.id, infoURL, "", map[string]string{"bizData[resource_id]": it.id}); u != "" {
+			return u, map[string]any{"resource_id": it.id, "resource_type": typ, "api": infoURL}
+		}
+		return "", map[string]any{"blocked_reason": "blocked: needs column endpoint resolution", "resource_id": it.id, "resource_type": typ}
 	}
-	return videoMediaURL(c, jar, ctx, it.id), map[string]any{"resource_id": it.id, "resource_type": "video", "api": sourceURL}
+	if u := firstMediaURL(it.raw); u != "" {
+		if strings.Contains(strings.ToLower(u), "__ba") {
+			return "", map[string]any{"blocked_reason": "blocked: needs private lookback decrypt", "resource_id": it.id, "resource_type": typ}
+		}
+		baseExtra["api"] = "source"
+		return u, baseExtra
+	}
+	u, extra := videoMediaURL(c, jar, ctx, it.id)
+	if u == "" {
+		return "", map[string]any{"blocked_reason": "blocked: needs protected live or video source resolution", "resource_id": it.id, "resource_type": typ}
+	}
+	for k, v := range extra {
+		baseExtra[k] = v
+	}
+	return u, baseExtra
 }
 
-func videoMediaURL(c *util.Client, jar http.CookieJar, ctx xetCtx, vid string) string {
+func videoMediaURL(c *util.Client, jar http.CookieJar, ctx xetCtx, vid string) (string, map[string]any) {
 	h := headers(jar, referer(ctx))
 	api := fmt.Sprintf(sourceURL, ctx.appID, firstNonEmpty(ctx.xetDomain, xetDomainDefault))
 	form := map[string]string{"bizData[opr_sys]": "Win32", "bizData[product_id]": firstNonEmpty(ctx.cid, vid), "bizData[resource_id]": vid}
@@ -98,29 +135,29 @@ func videoMediaURL(c *util.Client, jar http.CookieJar, ctx xetCtx, vid string) s
 	}
 	body, err := c.PostForm(api, form, h)
 	if err != nil {
-		return ""
+		return "", nil
 	}
 	var root map[string]any
 	if json.Unmarshal([]byte(body), &root) != nil {
-		return ""
+		return "", nil
 	}
 	if u := firstMediaURL(root["data"]); u != "" {
-		return u
+		return u, map[string]any{"api": api}
 	}
 	if s := deepText(root, "video_urls", "play_urls", "url"); s != "" {
 		if u := firstURLInString(s); u != "" {
-			return u
+			return u, map[string]any{"api": api}
 		}
 	}
 	if ps := deepText(root, "play_sign", "playSign"); ps != "" && ctx.appID != "" {
 		if u := postDetailURL(c, jar, ctx, vid, videoPlayURL, "", map[string]string{"play_sign": ps}); u != "" {
-			return u
+			return u, map[string]any{"api": videoPlayURL}
 		}
 	}
-	return ""
+	return "", nil
 }
 
-func liveMediaURL(c *util.Client, jar http.CookieJar, ctx xetCtx, id string) string {
+func liveMediaURL(c *util.Client, jar http.CookieJar, ctx xetCtx, id string) (string, map[string]any) {
 	h := headers(jar, referer(ctx))
 	urls := []string{}
 	if ctx.appID != "" {
@@ -133,13 +170,19 @@ func liveMediaURL(c *util.Client, jar http.CookieJar, ctx xetCtx, id string) str
 		if body, err := c.GetString(api, h); err == nil {
 			var root map[string]any
 			if json.Unmarshal([]byte(body), &root) == nil {
+				if containsPrivateXiaoetechFlow(root["data"]) {
+					return "", map[string]any{"blocked_reason": "blocked: needs private lookback decrypt", "api": api}
+				}
 				if u := firstMediaURL(root["data"]); u != "" {
-					return u
+					if strings.Contains(strings.ToLower(u), "__ba") {
+						return "", map[string]any{"blocked_reason": "blocked: needs private lookback decrypt", "api": api}
+					}
+					return u, map[string]any{"api": api}
 				}
 			}
 		}
 	}
-	return ""
+	return "", nil
 }
 
 func postDetailURL(c *util.Client, jar http.CookieJar, ctx xetCtx, id, h5Tpl, pcTpl string, form map[string]string) string {
@@ -211,7 +254,7 @@ func normType(t string) string {
 }
 func firstMediaURL(v any) string {
 	for _, m := range mapsUnder(v) {
-		for _, k := range []string{"video_m3u8_url", "video_hls", "video_url", "audio_m3u8_url", "audio_url", "video_audio_url", "aliveVideoUrl", "alive_video_url", "aliveVideoMp4Url", "aliveVideoUrlEncrypt", "miniAliveVideoUrl", "aliveReviewUrl", "file_url", "url", "m3u8_url", "play_url", "PlayURL"} {
+		for _, k := range []string{"video_m3u8_url", "video_hls", "video_url", "audio_m3u8_url", "audio_url", "video_audio_url", "aliveVideoUrl", "alive_video_url", "aliveVideoMp4Url", "miniAliveVideoUrl", "aliveReviewUrl", "file_url", "url", "m3u8_url", "play_url", "PlayURL"} {
 			if u := normalizeURL(val(m, k)); isMediaURL(u) {
 				return u
 			}
@@ -232,7 +275,28 @@ func media(title, u string, extra map[string]any) *extractor.MediaInfo {
 	if title == "" {
 		title = "xiaoetech_video"
 	}
-	return &extractor.MediaInfo{Site: "xiaoetech", Title: title, Streams: map[string]extractor.Stream{"default": {Quality: "source", URLs: []string{u}, Format: formatOf(u), Headers: map[string]string{"Referer": refererURL}}}, Extra: extra}
+	stream := extractor.Stream{Quality: "source", URLs: []string{u}, Format: formatOf(u), Headers: map[string]string{"Referer": refererURL}}
+	if strings.Contains(strings.ToLower(stream.Format), "m3u8") {
+		stream.NeedMerge = true
+	}
+	return &extractor.MediaInfo{Site: "xiaoetech", Title: title, Streams: map[string]extractor.Stream{"default": stream}, Extra: extra}
+}
+
+func containsPrivateXiaoetechFlow(v any) bool {
+	for _, m := range mapsUnder(v) {
+		for _, k := range []string{"aliveVideoUrlEncrypt", "private_info", "private_m3u8"} {
+			if s := strings.ToLower(val(m, k)); s != "" && s != "0" && s != "false" && s != "<nil>" {
+				return true
+			}
+		}
+		for _, k := range []string{"url", "video_url", "aliveVideoUrl", "aliveReviewUrl", "miniAliveVideoUrl"} {
+			s := strings.ToLower(val(m, k))
+			if strings.Contains(s, "__ba") || strings.Contains(s, "distribute.vod.pri.get") {
+				return true
+			}
+		}
+	}
+	return false
 }
 func listUnder(v any, key string) []map[string]any {
 	for _, m := range mapsUnder(v) {

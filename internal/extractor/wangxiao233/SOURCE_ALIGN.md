@@ -52,3 +52,10 @@
 ## 阻塞步骤
 
 无.
+
+## R2 critical follow-up
+
+| 缺口 | 处理结果 |
+|---|---|
+| Aliyun VOD `getPlayInfoAndAuth` 后续签名流程 | `resolveVideo` 现在解码 `data.playAuth`, 规范化 `regionId`, 调用 `shared.AliyunResolvePlayInfo` 生成 VOD `GetPlayInfo` HMAC-SHA1 签名请求. |
+| Aliyun MTS key/license | shared helper 在 m3u8 加密时抓取 manifest key token 并请求 `mts.{region}.aliyuncs.com` `GetLicense`, 成功后写入 `Extra.m3u8_text`; 失败返回 `blocked: needs Aliyun STS SDK / DRM engine`, 不再假成功. |

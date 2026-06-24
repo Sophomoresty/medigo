@@ -96,7 +96,7 @@ func (w *Wangxiao233) Extract(rawURL string, opts *extractor.ExtractOpts) (*extr
 			continue
 		}
 		for _, v := range collectVideos(chapterData) {
-			mi, err := resolveVideo(c, sess, v)
+			mi, err := resolveVideo(c, sess, v, opts)
 			if err != nil || mi == nil || len(mi.Streams) == 0 {
 				continue
 			}
@@ -228,7 +228,7 @@ func collectVideos(data any) []wx233Video {
 	}
 	return out
 }
-func resolveVideo(c *util.Client, sess wx233Session, v wx233Video) (*extractor.MediaInfo, error) {
+func resolveVideo(c *util.Client, sess wx233Session, v wx233Video, opts *extractor.ExtractOpts) (*extractor.MediaInfo, error) {
 	if v.detailID != "" && v.polyVid == "" && v.essVid == "" && v.aliyunVid == "" {
 		if data, err := apiGetData(c, sess, urlVodDetail, map[string]string{"detailIds": v.detailID}); err == nil {
 			for _, m := range mapsUnder(data) {
@@ -246,9 +246,31 @@ func resolveVideo(c *util.Client, sess wx233Session, v wx233Video) (*extractor.M
 	}
 	if v.aliyunVid != "" {
 		if m, err := apiGet(c, sess, urlPlayAuth, map[string]string{"videoId": v.aliyunVid}); err == nil {
-			if u := firstMediaURL(m); u != "" {
-				return media(v.title, u, mediaFormat(u), map[string]any{"aliyun_vid": v.aliyunVid}), nil
+			data, _ := m["data"].(map[string]any)
+			payload := shared.AliyunDecodePlayAuth(data["playAuth"])
+			payload.Region = firstNonEmpty(payload.Region, val(data, "regionId"))
+			if payload.Region == "" {
+				payload.Region = "cn-shanghai"
 			}
+			playOpts := shared.AliyunPlayOptions{
+				Referer:         refererURL,
+				Origin:          "https://wx.233.com",
+				Quality:         firstNonEmpty(qualityFromOpts(opts)),
+				FetchM3U8:       true,
+				RewriteM3U8Keys: true,
+			}
+			if playCfg, err := json.Marshal(map[string]string{"EncryptType": "AliyunVoDEncryption"}); err == nil {
+				playOpts.ExtraParams = map[string]string{"PlayConfig": string(playCfg)}
+			}
+			info, err := shared.AliyunResolvePlayInfo(c, payload, v.aliyunVid, playOpts)
+			if err != nil {
+				return nil, fmt.Errorf("blocked: needs Aliyun STS SDK / DRM engine: %w", err)
+			}
+			extra := map[string]any{"aliyun_vid": v.aliyunVid, "aliyun_api": info.APIURL, "source_type": info.SourceType}
+			if info.M3U8Text != "" {
+				extra["m3u8_text"] = info.M3U8Text
+			}
+			return media(v.title, info.URL, info.Format, extra), nil
 		}
 	}
 	return nil, fmt.Errorf("wangxiao233: unsupported video source")
@@ -358,7 +380,11 @@ func media(title, u, fmtName string, extra map[string]any) *extractor.MediaInfo 
 	if title == "" {
 		title = "video"
 	}
-	return &extractor.MediaInfo{Site: "wangxiao233", Title: title, Streams: map[string]extractor.Stream{"default": {Quality: "best", URLs: []string{u}, Format: fmtName, Headers: map[string]string{"Referer": refererURL}}}, Extra: extra}
+	stream := extractor.Stream{Quality: "best", URLs: []string{u}, Format: fmtName, Headers: map[string]string{"Referer": refererURL}}
+	if strings.Contains(strings.ToLower(fmtName), "m3u8") {
+		stream.NeedMerge = true
+	}
+	return &extractor.MediaInfo{Site: "wangxiao233", Title: title, Streams: map[string]extractor.Stream{"default": stream}, Extra: extra}
 }
 func mediaFormat(u string) string {
 	u = strings.ToLower(u)
@@ -377,4 +403,11 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func qualityFromOpts(opts *extractor.ExtractOpts) string {
+	if opts == nil {
+		return ""
+	}
+	return opts.Quality
 }

@@ -31,7 +31,11 @@ const (
 	audioURL          = "https://%s%s/xe.course.business.audio.info.get/2.0.0"
 	pcAudioURL        = "https://%s/xe.course.business.audio.info.get/2.0.0"
 	textURL           = "https://%s%s/xe.course.business.get.detail/2.0.0"
+	pcTextURL         = "https://%s/xe.course.business.get.detail/2.0.0"
+	ebookURL          = "https://%s%s/xe.course.business.ebook.info/2.0.0"
+	pcEbookURL        = "https://%s/xe.course.business.ebook.info/2.0.0"
 	fileURL           = "https://%s%s/xe.course.business.courseware_list.get/2.0.0"
+	pcFileURL         = "https://%s/xe.course.business.courseware_list.get/2.0.0"
 	pageSize          = 30
 )
 
@@ -75,6 +79,7 @@ func (x *Xiaoetech) Extract(rawURL string, opts *extractor.ExtractOpts) (*extrac
 		return nil, err
 	}
 	entries := []*extractor.MediaInfo{}
+	blockedReasons := []string{}
 	seenURL, seenItem := map[string]bool{}, map[string]bool{}
 	for _, it := range items {
 		if it.id == "" || seenItem[it.id] || (ctx.cid != "" && it.id != ctx.cid) {
@@ -82,6 +87,10 @@ func (x *Xiaoetech) Extract(rawURL string, opts *extractor.ExtractOpts) (*extrac
 		}
 		seenItem[it.id] = true
 		u, extra := resolveItem(c, opts.Cookies, ctx.withItem(it), it)
+		if reason := val(extra, "blocked_reason"); reason != "" {
+			blockedReasons = append(blockedReasons, reason)
+			continue
+		}
 		if u == "" || seenURL[u] {
 			continue
 		}
@@ -89,6 +98,9 @@ func (x *Xiaoetech) Extract(rawURL string, opts *extractor.ExtractOpts) (*extrac
 		entries = append(entries, media(firstNonEmpty(it.title, ctx.title, it.id), u, extra))
 	}
 	if len(entries) == 0 {
+		if len(blockedReasons) > 0 {
+			return nil, fmt.Errorf("blocked: %s", blockedReasons[0])
+		}
 		return nil, fmt.Errorf("xiaoetech: no playable URL resolved from source APIs")
 	}
 	return &extractor.MediaInfo{Site: "xiaoetech", Title: firstNonEmpty(ctx.title, "xiaoetech"), Entries: entries}, nil

@@ -46,3 +46,11 @@
 ## 阻塞步骤
 
 无.
+
+## R2 critical follow-up
+
+| 缺口 | 处理结果 |
+|---|---|
+| Aliyun STS `GetPlayInfo` 参数覆盖 | `resolveVideo` 现在把 `/alibaba/get_sts` 的 `ky/sc/tk` 映射为 shared Aliyun payload, 按源码附加 `StreamType`, `Channel`, `PlayerVersion`, `PlayConfig={"EncryptType":"AliyunVoDEncryption"}` 后签名请求 VOD `GetPlayInfo`. |
+| Aliyun MTS `GetLicense` | m3u8 加密流会抓取 manifest 并调用 `shared.AliyunRewriteM3U8Keys`; MTS license 失败时返回 `blocked: needs Aliyun STS SDK / DRM engine`, 不再返回未解密的假成功 URL. |
+| `MtsHlsUriToken` | `/alibaba/get_play_token` 返回 token 时追加到 HLSEncryption m3u8 查询参数. |

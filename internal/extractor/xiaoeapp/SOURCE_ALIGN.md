@@ -39,3 +39,10 @@
 ## 阻塞步骤
 
 无.
+
+## R2 critical follow-up
+
+| 缺口 | 处理结果 |
+|---|---|
+| protected/private lookback m3u8 | live 分支现在先检查 `aliveVideoUrlEncrypt`, `private_info`, `private_m3u8`, `__ba`, `distribute.vod.pri.get`; 命中时返回 `blocked: needs xiaoe private lookback m3u8 decrypt`, 不再把加密/私有 URL 当作可下载直链. |
+| private video m3u8 | goods detail 分支同样检测私有 manifest/key 元数据, 命中后显式 blocked, 避免假成功. |

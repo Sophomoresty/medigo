@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nichuanfang/medigo/internal/extractor"
+	"github.com/nichuanfang/medigo/internal/extractor/shared"
 	"github.com/nichuanfang/medigo/internal/util"
 )
 
@@ -79,7 +80,7 @@ func (s *Wowtiku) Extract(rawURL string, opts *extractor.ExtractOpts) (*extracto
 	entries := []*extractor.MediaInfo{}
 	seen := map[string]bool{}
 	for _, v := range videos {
-		entry, err := resolveVideo(c, sess, v)
+		entry, err := resolveVideo(c, sess, v, opts)
 		if err != nil || entry == nil || len(entry.Streams) == 0 {
 			continue
 		}
@@ -195,7 +196,7 @@ func classIDs(data any) []string {
 	}
 	return out
 }
-func resolveVideo(c *util.Client, sess wtSession, v wtVideo) (*extractor.MediaInfo, error) {
+func resolveVideo(c *util.Client, sess wtSession, v wtVideo, opts *extractor.ExtractOpts) (*extractor.MediaInfo, error) {
 	if v.directURL != "" {
 		return media(v.title, normalizeURL(v.directURL), mediaFormat(v.directURL), map[string]any{"vid": v.vid}), nil
 	}
@@ -206,11 +207,45 @@ func resolveVideo(c *util.Client, sess wtSession, v wtVideo) (*extractor.MediaIn
 	if err != nil {
 		return nil, err
 	}
-	u, err := aliyunPlayURL(c, sts, v.vid)
-	if err != nil {
-		return nil, err
+	payload := shared.AliyunPayloadFromMap(firstMap(sts), sts)
+	payload.Region = firstNonEmpty(payload.Region, vodRegion)
+	playCfg, _ := json.Marshal(map[string]string{"EncryptType": "AliyunVoDEncryption"})
+	playOpts := shared.AliyunPlayOptions{
+		Referer:     refererURL,
+		Origin:      originURL,
+		Quality:     qualityFromOpts(opts),
+		Formats:     "m3u8",
+		ExtraParams: map[string]string{"StreamType": "video", "Channel": "HTML5", "PlayerVersion": "2.32.0", "PlayConfig": string(playCfg)},
 	}
-	return media(v.title, u, mediaFormat(u), map[string]any{"vid": v.vid, "vod_region": vodRegion}), nil
+	info, err := shared.AliyunResolvePlayInfo(c, payload, v.vid, playOpts)
+	if err != nil {
+		return nil, fmt.Errorf("blocked: needs Aliyun STS SDK / DRM engine: %w", err)
+	}
+	playToken := ""
+	if tokenData, err := requestData(c, sess, playTokenAPI, nil, nil, "GET", "www", "v1"); err == nil {
+		playToken = firstNonEmpty(val(firstMap(tokenData), "MtsHlsUriToken"), val(firstMap(tokenData), "mtsHlsUriToken"))
+	}
+	playURL := normalizeURL(info.URL)
+	extra := map[string]any{"vid": v.vid, "vod_region": payload.Region, "aliyun_api": info.APIURL, "source_type": info.SourceType, "encrypt_type": info.EncryptType}
+	if info.NeedMerge {
+		if info.EncryptType == "HLSEncryption" && playToken != "" {
+			playURL = appendQueryParam(playURL, "MtsHlsUriToken", playToken)
+			extra["mts_hls_uri_token"] = playToken
+		}
+		text, err := c.GetString(playURL, map[string]string{"Origin": originURL, "Referer": refererURL, "Accept": "application/json, text/plain, */*"})
+		if err == nil && text != "" {
+			if info.Encrypted && info.EncryptType == "AliyunVoDEncryption" {
+				rewritten, err := shared.AliyunRewriteM3U8Keys(c, text, payload, info.EncryptType, playURL, playOpts)
+				if err != nil {
+					return nil, fmt.Errorf("blocked: needs Aliyun STS SDK / DRM engine: %w", err)
+				}
+				text = rewritten
+			}
+			extra["m3u8_text"] = text
+			extra["source_type"] = "m3u8_text"
+		}
+	}
+	return media(v.title, playURL, firstNonEmpty(info.Format, mediaFormat(playURL)), extra), nil
 }
 func aliyunPlayURL(c *util.Client, sts any, vid string) (string, error) {
 	m := firstMap(sts)
@@ -353,7 +388,11 @@ func media(title, u, fmtName string, extra map[string]any) *extractor.MediaInfo 
 	if title == "" {
 		title = "video"
 	}
-	return &extractor.MediaInfo{Site: "wowtiku", Title: title, Streams: map[string]extractor.Stream{"default": {Quality: "best", URLs: []string{u}, Format: fmtName, Headers: map[string]string{"Referer": refererURL}}}, Extra: extra}
+	stream := extractor.Stream{Quality: "best", URLs: []string{u}, Format: fmtName, Headers: map[string]string{"Referer": refererURL}}
+	if strings.Contains(strings.ToLower(fmtName), "m3u8") {
+		stream.NeedMerge = true
+	}
+	return &extractor.MediaInfo{Site: "wowtiku", Title: title, Streams: map[string]extractor.Stream{"default": stream}, Extra: extra}
 }
 func mediaFormat(u string) string {
 	l := strings.ToLower(u)
@@ -372,4 +411,31 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func appendQueryParam(raw, key, value string) string {
+	if raw == "" || key == "" || value == "" {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		sep := "?"
+		if strings.Contains(raw, "?") {
+			sep = "&"
+		}
+		return raw + sep + url.QueryEscape(key) + "=" + url.QueryEscape(value)
+	}
+	q := u.Query()
+	if q.Get(key) == "" {
+		q.Set(key, value)
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func qualityFromOpts(opts *extractor.ExtractOpts) string {
+	if opts == nil {
+		return ""
+	}
+	return opts.Quality
 }
