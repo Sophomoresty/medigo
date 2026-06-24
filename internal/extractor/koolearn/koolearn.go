@@ -83,7 +83,10 @@ func (k *Koolearn) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 	}
 	entries := make([]*extractor.MediaInfo, 0, len(lessons))
 	for i, lesson := range lessons {
-		entry := buildRoomboxEntry(c, i+1, lesson)
+		entry, err := buildRoomboxEntry(c, i+1, lesson)
+		if err != nil {
+			return nil, err
+		}
 		if entry != nil {
 			entries = append(entries, entry)
 		}
@@ -160,18 +163,22 @@ type roomboxRecorded struct {
 	URL string `json:"url"`
 }
 
-func buildRoomboxEntry(c *util.Client, index int, lesson roomboxLesson) *extractor.MediaInfo {
+func buildRoomboxEntry(c *util.Client, index int, lesson roomboxLesson) (*extractor.MediaInfo, error) {
 	title := firstText(lesson.ClassroomName, lesson.Title, lesson.Name, lesson.ClassName, "未命名")
 	roomID := firstText(lesson.ID, lesson.RoomID)
 	videoURL := extractPlaybackURL(lesson.Playback, lesson.RecordedMedia)
 	if videoURL == "" && roomID != "" {
-		videoURL, _ = fetchRoomboxModuleURL(c, roomID)
+		var err error
+		videoURL, err = fetchRoomboxModuleURL(c, roomID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if videoURL == "" {
-		return nil
+		return nil, nil
 	}
 	stream := extractor.Stream{Quality: "best", URLs: []string{videoURL}, Format: mediaExt(videoURL), Headers: map[string]string{"Referer": urlRoomReferer}}
-	return &extractor.MediaInfo{Site: "koolearn", Title: fmt.Sprintf("[%d]-%s", index, title), Streams: map[string]extractor.Stream{"best": stream}, Extra: map[string]any{"room_id": roomID, "class_id": firstText(lesson.ClassID)}}
+	return &extractor.MediaInfo{Site: "koolearn", Title: fmt.Sprintf("[%d]-%s", index, title), Streams: map[string]extractor.Stream{"best": stream}, Extra: map[string]any{"room_id": roomID, "class_id": firstText(lesson.ClassID)}}, nil
 }
 
 func fetchRoomboxModuleURL(c *util.Client, roomID string) (string, error) {

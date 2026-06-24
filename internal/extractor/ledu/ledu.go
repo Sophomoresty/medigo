@@ -77,7 +77,9 @@ func (s *Ledu) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.M
 		return nil, fmt.Errorf("ledu requires stuId/user_id cookie")
 	}
 	headers := leduHeaders(cookie, studentID, "", "", "", "", "")
-	_, _ = leduGetJSON(c, courseAPIHost, courseSubjectListPath, map[string]string{"stuId": studentID}, headers)
+	if _, err := leduGetJSON(c, courseAPIHost, courseSubjectListPath, map[string]string{"stuId": studentID}, headers); err != nil {
+		return nil, fmt.Errorf("ledu validate pc cookie: %w", err)
+	}
 
 	cid := parseClassID(rawURL)
 	classes := fetchClasses(c, headers, studentID)

@@ -43,7 +43,7 @@ type Imooc struct{}
 
 func (i *Imooc) Patterns() []string { return patterns }
 
-func (i *Imooc) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.MediaInfo, error) {
+func (i *Imooc) Extract(rawURL string, opts *extractor.ExtractOpts) (info *extractor.MediaInfo, err error) {
 	if opts == nil || opts.Cookies == nil {
 		return nil, fmt.Errorf("imooc requires login cookies (use --cookies or --cookies-from-browser)")
 	}
@@ -58,12 +58,18 @@ func (i *Imooc) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.
 	h := map[string]string{"Referer": host + "/"}
 
 	// startlearn heartbeat — class.imooc.com uses /course/startlearn, coding.imooc.com
-	// uses /lesson/ajaxstartlearn. Body just needs mid+cid (or pid+cid for class).
-	startURL, endURL := lifecycleURLs(host)
-	_, _ = c.PostForm(startURL, map[string]string{"mid": mid, "cid": cid, "_id": cid}, h)
-	defer func() {
-		_, _ = c.PostForm(endURL, map[string]string{"mid": mid, "cid": cid, "_id": cid}, h)
-	}()
+	// uses /lesson/ajaxstartlearn. Free imooc.com has no lifecycle endpoint.
+	startURL, endURL, hasLifecycle := lifecycleURLs(host)
+	if hasLifecycle {
+		if _, err := c.PostForm(startURL, map[string]string{"mid": mid, "cid": cid, "_id": cid}, h); err != nil {
+			return nil, fmt.Errorf("imooc startlearn: %w", err)
+		}
+		defer func() {
+			if _, endErr := c.PostForm(endURL, map[string]string{"mid": mid, "cid": cid, "_id": cid}, h); endErr != nil && err == nil {
+				err = fmt.Errorf("imooc endlearn: %w", endErr)
+			}
+		}()
+	}
 
 	// Fetch the encoded m3u8 manifest. For class.imooc.com paid content the
 	// response is JSON with imooc_decode-encoded URLs we can't process without
@@ -107,15 +113,14 @@ func parseURL(u string) (cid, mid, host string) {
 	return cid, mid, host
 }
 
-func lifecycleURLs(host string) (start, end string) {
+func lifecycleURLs(host string) (start, end string, enabled bool) {
 	if strings.Contains(host, "coding.imooc.com") {
-		return host + "/lesson/ajaxstartlearn", host + "/lesson/ajaxendlearn"
+		return host + "/lesson/ajaxstartlearn", host + "/lesson/ajaxendlearn", true
 	}
 	if strings.Contains(host, "class.imooc.com") {
-		return host + "/course/startlearn", host + "/course/endlearn"
+		return host + "/course/startlearn", host + "/course/endlearn", true
 	}
-	// Free imooc.com — no formal lifecycle endpoint, but stub to same shape.
-	return host + "/course/startlearn", host + "/course/endlearn"
+	return "", "", false
 }
 
 func mediaURL(host, mid, cid string) string {

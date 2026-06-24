@@ -108,7 +108,10 @@ func (i *ICourse163) Extract(rawURL string, opts *extractor.ExtractOpts) (*extra
 
 	memberID := match1(page, `id\s*:\s*"(\d+)",\s*nickName\s*:\s*"`)
 	if memberID == "" {
-		home, _ := c.GetString(homeURL, headers())
+		home, err := c.GetString(homeURL, headers())
+		if err != nil {
+			return nil, fmt.Errorf("fetch home for member id: %w", err)
+		}
 		memberID = match1(home, `id\s*:\s*"(\d+)",\s*nickName\s*:\s*"`)
 	}
 
@@ -121,11 +124,15 @@ func (i *ICourse163) Extract(rawURL string, opts *extractor.ExtractOpts) (*extra
 	}
 
 	var entries []*extractor.MediaInfo
+	var firstErr error
 	for ci, ch := range chapters {
 		for li, ls := range ch.lessons {
 			for ui, vu := range ls.videos {
 				ps, err := fetchVideoStream(c, vu, memberID)
 				if err != nil || ps.url == "" {
+					if err != nil && firstErr == nil {
+						firstErr = err
+					}
 					continue
 				}
 				name := fmt.Sprintf("%02d.%02d.%02d %s", ci+1, li+1, ui+1, sanitize(vu.name))
@@ -146,6 +153,9 @@ func (i *ICourse163) Extract(rawURL string, opts *extractor.ExtractOpts) (*extra
 		}
 	}
 	if len(entries) == 0 {
+		if firstErr != nil {
+			return nil, fmt.Errorf("no playable videos found (course locked or already ended): %w", firstErr)
+		}
 		return nil, fmt.Errorf("no playable videos found (course locked or already ended)")
 	}
 
@@ -263,12 +273,15 @@ type pickedStream struct {
 }
 
 func fetchVideoStream(c *util.Client, v videoUnit, memberID string) (pickedStream, error) {
-	body, _ := c.PostForm(parseURL, dwrData("getLessonUnitLearnVo", map[string]string{
+	body, err := c.PostForm(parseURL, dwrData("getLessonUnitLearnVo", map[string]string{
 		"c0-param0": "number:" + v.contentID,
 		"c0-param1": "number:" + v.contentType,
 		"c0-param2": "number:0",
 		"c0-param3": "number:" + v.unitID,
 	}), headers())
+	if err != nil {
+		return pickedStream{}, fmt.Errorf("getLessonUnitLearnVo: %w", err)
+	}
 
 	for _, q := range []string{"Shd", "Hd", "Sd"} {
 		re := regexp.MustCompile(`mp4` + q + `Url="([^"]+\.mp4[^"]*)"`)
@@ -281,8 +294,11 @@ func fetchVideoStream(c *util.Client, v videoUnit, memberID string) (pickedStrea
 		return pickedStream{}, fmt.Errorf("no direct mp4 and cannot sign vod request")
 	}
 
-	tsBody, _ := c.GetString(timestampURL, nil)
-	ts := match1(tsBody, `"t"\s*:\s*"(\d+)"`)
+	tsBody, err := c.GetString(timestampURL, nil)
+	ts := ""
+	if err == nil {
+		ts = match1(tsBody, `"t"\s*:\s*"(\d+)"`)
+	}
 	if ts == "" {
 		ts = strconv.FormatInt(time.Now().UnixMilli(), 10)
 	}
