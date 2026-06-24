@@ -1,7 +1,13 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
-  }
+  "data": [
+    {
+      "chapterName": "Chapter 1",
+      "courseLessonList": [
+        {
+          "lessonName": "Lesson 1",
+          "id": "1"
+        }
+      ]
+    }
+  ]
 }

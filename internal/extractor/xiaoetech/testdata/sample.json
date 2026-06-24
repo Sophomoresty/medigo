@@ -1,7 +1,15 @@
 {
   "code": 0,
   "data": {
-    "title": "test_course",
-    "list": []
+    "title": "Test Course",
+    "list": [
+      {
+        "resource_id": "lesson-1",
+        "resource_type": "video",
+        "title": "Lesson 1",
+        "app_id": "demo",
+        "h5_url": "https://media.example.com/xiaoetech/lesson-1.m3u8"
+      }
+    ]
   }
 }

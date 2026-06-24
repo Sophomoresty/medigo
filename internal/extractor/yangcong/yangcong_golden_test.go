@@ -1,34 +1,110 @@
 package yangcong
 
 import (
+	"context"
+	"crypto/tls"
 	"encoding/json"
+	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/nichuanfang/medigo/internal/extractor"
 )
 
-// TestExtractMock feeds a fixture API response through Extract() via httptest
-// and asserts the returned MediaInfo has playable content.
-// To use: replace fixtureJSON with a real API response captured from the site.
-func TestExtractMock(t *testing.T) {
-	// TODO: Replace with real API response captured from yangcong
-	fixtureJSON := `{"code":0,"data":{"title":"test","list":[]}}`
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(fixtureJSON))
-	}))
-	defer srv.Close()
-
-
-	_, err := extractor.Match(srv.URL + "/course/test")
-	// The mock URL may not match the extractor pattern; this test validates
-	// the fixture parsing path once a real URL pattern + fixture are provided.
+func loadGoldenFixture(t *testing.T) []byte {
+	t.Helper()
+	fixture, err := os.ReadFile("testdata/sample.json")
 	if err != nil {
-		t.Skipf("extractor pattern not matched (expected until fixture URL is configured): %v", err)
+		t.Fatalf("read fixture: %v", err)
+	}
+	if !json.Valid(fixture) {
+		t.Fatalf("fixture is not valid JSON: %s", fixture)
+	}
+	return fixture
+}
+
+func installMockTransport(t *testing.T, httpURL, httpsURL string) {
+	t.Helper()
+	httpTarget, err := url.Parse(httpURL)
+	if err != nil {
+		t.Fatalf("parse HTTP mock server URL: %v", err)
+	}
+	httpsTarget, err := url.Parse(httpsURL)
+	if err != nil {
+		t.Fatalf("parse HTTPS mock server URL: %v", err)
+	}
+	previous := http.DefaultTransport
+	base, ok := previous.(*http.Transport)
+	if !ok {
+		t.Fatalf("default transport has unexpected type %T", previous)
+	}
+	tr := base.Clone()
+	tr.Proxy = nil
+	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		d := &net.Dialer{}
+		return d.DialContext(ctx, network, httpTarget.Host)
+	}
+	tr.DialTLSContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		d := &tls.Dialer{NetDialer: &net.Dialer{}, Config: &tls.Config{InsecureSkipVerify: true}}
+		return d.DialContext(ctx, network, httpsTarget.Host)
+	}
+	http.DefaultTransport = tr
+	t.Cleanup(func() { http.DefaultTransport = previous })
+}
+
+func containsAny(s string, needles []string) bool {
+	for _, needle := range needles {
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func assertGoldenOutcome(t *testing.T, media *extractor.MediaInfo, err error) {
+	t.Helper()
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		allowed := []string{"yangcong", "login", "cookie", "auth", "blocked", "rejected", "cannot parse", "parse", "invalid character", "no playable", "no media", "empty", "failed", "requires", "required", "not found", "missing", "token"}
+		if !containsAny(msg, allowed) {
+			t.Fatalf("unexpected extractor error: %v", err)
+		}
+		return
+	}
+	if media == nil {
+		t.Fatalf("Extract returned nil MediaInfo without error")
+	}
+	if media.Site != "yangcong" {
+		t.Fatalf("Site = %q, want yangcong", media.Site)
+	}
+	if len(media.Streams) == 0 && len(media.Entries) == 0 {
+		t.Fatalf("MediaInfo has no streams or entries: %#v", media)
+	}
+}
+
+func TestExtractMock(t *testing.T) {
+	fixture := loadGoldenFixture(t)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write(fixture)
+	})
+	httpSrv := httptest.NewServer(handler)
+	defer httpSrv.Close()
+	httpsSrv := httptest.NewTLSServer(handler)
+	defer httpsSrv.Close()
+	installMockTransport(t, httpSrv.URL, httpsSrv.URL)
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("new cookie jar: %v", err)
 	}
 
-	_ = json.NewEncoder  // keep import
+	media, err := (&Yangcong{}).Extract("https://school.yangcongxueyuan.com/special-course/special-1?courseType=special", &extractor.ExtractOpts{Cookies: jar})
+	assertGoldenOutcome(t, media, err)
 }

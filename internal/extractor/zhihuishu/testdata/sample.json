@@ -1,7 +1,18 @@
 {
-  "code": 0,
+  "result": {
+    "uuid": "uuid-1",
+    "lines": [
+      {
+        "lineID": 2
+      },
+      {
+        "lineID": 1
+      }
+    ]
+  },
   "data": {
-    "title": "test_course",
-    "list": []
-  }
+    "courseName": "Test Course",
+    "videoID": "video-0001"
+  },
+  "body": "<html><title>Test Course</title></html>"
 }

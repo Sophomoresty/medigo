@@ -1,7 +1,24 @@
 {
-  "code": 0,
+  "success": false,
   "data": {
-    "title": "test_course",
-    "list": []
+    "title": "Test Course",
+    "videoPackageTab": [
+      {
+        "title": "Lesson 1",
+        "downloadUrl": "https://media.example.com/youdao/lesson-1.m3u8",
+        "id": "v1",
+        "cardPackageId": "c1",
+        "liveCenterId": "l1"
+      }
+    ],
+    "videoList": [
+      {
+        "title": "Lesson 1",
+        "downloadUrl": "https://media.example.com/youdao/lesson-1.m3u8",
+        "id": "v1",
+        "cardPackageId": "c1",
+        "liveCenterId": "l1"
+      }
+    ]
   }
 }

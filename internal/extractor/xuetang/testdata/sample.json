@@ -1,7 +1,40 @@
 {
-  "code": 0,
   "data": {
-    "title": "test_course",
-    "list": []
+    "classroom_name": "Test Course",
+    "content_data": [
+      {
+        "name": "Chapter 1",
+        "section_leaf_list": [
+          {
+            "name": "Lesson 1",
+            "leaf_type": 1,
+            "id": 1,
+            "leaf_list": [
+              {
+                "name": "Leaf 1",
+                "leaf_type": 2,
+                "id": 11
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "leaf_data": {
+      "content_info": {
+        "media": {
+          "ccid": "cc1",
+          "live_palyback_url": "https://media.example.com/xuetang/live.m3u8"
+        }
+      }
+    },
+    "sources": {
+      "quality10": [
+        "https://media.example.com/xuetang/lesson-1.mp4"
+      ],
+      "quality20": [
+        "https://media.example.com/xuetang/lesson-1-hd.mp4"
+      ]
+    }
   }
 }

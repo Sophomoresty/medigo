@@ -1,7 +1,26 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
-  }
+  "id": "student-1",
+  "role": "student",
+  "name": "Test Course",
+  "defaultBook": {
+    "name": "Test Course"
+  },
+  "children": [
+    {
+      "name": "Chapter 1",
+      "topics": [
+        {
+          "id": "topic-1",
+          "videoId": "video-1",
+          "title": "Lesson 1"
+        }
+      ]
+    }
+  ],
+  "videoList": [
+    {
+      "url": "https://media.example.com/yangcong/lesson-1.mp4",
+      "format": "mp4"
+    }
+  ]
 }

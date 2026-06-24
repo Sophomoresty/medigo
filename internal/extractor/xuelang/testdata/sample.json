@@ -1,7 +1,30 @@
 {
-  "code": 0,
+  "status_code": 1,
   "data": {
-    "title": "test_course",
-    "list": []
+    "student_course": {
+      "data": [
+        {
+          "course_info": {
+            "course_id": "1001",
+            "title": "Test Course"
+          }
+        }
+      ]
+    },
+    "data": [
+      {
+        "lesson_info": {
+          "title": "Lesson 1",
+          "related_room_id_str": "room1",
+          "video": {
+            "play_auth_token": "auth1"
+          }
+        }
+      }
+    ],
+    "forward_cursor": {
+      "cursor": "0",
+      "has_more": false
+    }
   }
 }

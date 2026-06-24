@@ -1,7 +1,11 @@
 {
   "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
-  }
+  "data": [
+    {
+      "courseId": "2001",
+      "courseName": "Test Course",
+      "title": "Test Course",
+      "url": "https://media.example.com/zhaozhao/lesson-1.mp4"
+    }
+  ]
 }

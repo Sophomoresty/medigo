@@ -1,7 +1,15 @@
 {
-  "code": 0,
   "data": {
-    "title": "test_course",
-    "list": []
+    "homeWareList": [
+      {
+        "title": "Lesson 1",
+        "videoUrl": "https://media.example.com/zhengbao/lesson-1.mp4"
+      },
+      {
+        "title": "File 1",
+        "url": "https://media.example.com/zhengbao/handout.pdf"
+      }
+    ],
+    "freeWareList": []
   }
 }

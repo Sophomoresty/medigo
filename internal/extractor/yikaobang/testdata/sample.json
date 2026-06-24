@@ -1,7 +1,4 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
-  }
+  "blocked": true,
+  "message": "needs upstream API samples"
 }

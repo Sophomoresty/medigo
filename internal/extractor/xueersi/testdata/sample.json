@@ -1,7 +1,36 @@
 {
-  "code": 0,
+  "stat": 0,
+  "result": {
+    "data": {
+      "list": [
+        {
+          "courseId": "1001",
+          "stuCouId": "2001",
+          "courseName": "Test Course",
+          "type": "1",
+          "gradeId": "1"
+        },
+        {
+          "planId": "3001",
+          "planName": "Lesson 1"
+        }
+      ]
+    }
+  },
   "data": {
-    "title": "test_course",
-    "list": []
+    "configs": {
+      "videoFile": "fid1",
+      "beforeClassFileId": "fid2"
+    },
+    "planInfo": {
+      "id": "3001"
+    },
+    "content": {
+      "addrs": [
+        {
+          "addr": "https://media.example.com/xueersi/lesson-1.m3u8"
+        }
+      ]
+    }
   }
 }

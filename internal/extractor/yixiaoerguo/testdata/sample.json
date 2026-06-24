@@ -1,7 +1,26 @@
 {
-  "code": 0,
   "data": {
-    "title": "test_course",
-    "list": []
+    "course_info": {
+      "title": "Test Course"
+    },
+    "chapters": [
+      {
+        "section_id": "s1",
+        "type": "1",
+        "title": "Lesson 1",
+        "video": {
+          "url": "https://media.example.com/yixiaoerguo/lesson-1.m3u8"
+        }
+      }
+    ],
+    "list": [
+      {
+        "id": "s1",
+        "title": "Lesson 1",
+        "video": {
+          "url": "https://media.example.com/yixiaoerguo/lesson-1.m3u8"
+        }
+      }
+    ]
   }
 }

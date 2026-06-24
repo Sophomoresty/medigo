@@ -1,7 +1,24 @@
 {
   "code": 0,
   "data": {
-    "title": "test_course",
-    "list": []
+    "curriculum_detail": {
+      "title": "Test Course"
+    },
+    "lesson_list": [
+      {
+        "lesson_id": "l1",
+        "lesson_title": "Lesson 1",
+        "type": "1",
+        "media_url": "https://media.example.com/yizhiknow/lesson-1.mp4"
+      }
+    ],
+    "list": [
+      {
+        "lesson_id": "l1",
+        "title": "Lesson 1",
+        "vid_x": "vid1",
+        "url": "https://media.example.com/yizhiknow/lesson-1.mp4"
+      }
+    ]
   }
 }

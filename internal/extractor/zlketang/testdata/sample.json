@@ -1,7 +1,10 @@
 {
-  "code": 0,
+  "errcode": 1,
   "data": {
-    "title": "test_course",
-    "list": []
+    "course_id": "2001",
+    "product_id": "1001",
+    "course_name": "Test Course",
+    "url": "https://media.example.com/zlketang/lesson-1.m3u8",
+    "file_url": "https://media.example.com/zlketang/handout.pdf"
   }
 }

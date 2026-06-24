@@ -1,7 +1,32 @@
 {
-  "code": 0,
+  "stat": 0,
+  "status": 0,
   "data": {
-    "title": "test_course",
-    "list": []
-  }
+    "learningCourses": [
+      {
+        "courseId": "1001",
+        "courseName": "Test Course",
+        "stuCouId": "2001",
+        "type": "1"
+      }
+    ],
+    "endedCourses": [],
+    "list": [
+      {
+        "planId": "3001",
+        "planName": "Lesson 1",
+        "bizId": "3",
+        "configs": {
+          "appId": "demo",
+          "liveTypeId": "7",
+          "videoFile": "file1"
+        },
+        "planInfo": {
+          "liveTypeId": "7"
+        }
+      }
+    ],
+    "addr": "https://media.example.com/xiwang/lesson-1.m3u8"
+  },
+  "addr": "https://media.example.com/xiwang/lesson-1.m3u8"
 }
