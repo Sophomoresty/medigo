@@ -1,7 +1,20 @@
 {
-  "code": 0,
   "data": {
-    "title": "test_course",
-    "list": []
+    "list": [
+      {
+        "id": "lesson-1",
+        "room_id": "8001",
+        "class_id": "7001",
+        "classroom_name": "新东方在线示例回放",
+        "playback": {
+          "urls": [
+            "https://video.roombox.xdf.cn/demo.mp4"
+          ]
+        },
+        "recordedMedia": {
+          "url": ""
+        }
+      }
+    ]
   }
 }

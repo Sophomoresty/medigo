@@ -1,7 +1,22 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
-  }
+  "code": 1,
+  "msg": "success",
+  "confirm": 0,
+  "video_url": "https://cdn.huke88.com/course/174979/lesson-1.m3u8",
+  "catalogHeaderTitle": "虎课示例课程",
+  "catalog": [
+    {
+      "id": 174979,
+      "courseId": 174979,
+      "courseTitle": "第一课 平面设计入门",
+      "type": "video"
+    },
+    {
+      "video_id": 174980,
+      "video_name": "示例素材包",
+      "type": "file",
+      "file_type": 1,
+      "file_fmt": "zip"
+    }
+  ]
 }

@@ -1,7 +1,13 @@
 {
-  "code": 0,
+  "result": "success",
   "data": {
-    "title": "test_course",
-    "list": []
+    "replay": {
+      "liveRoomId": "room1",
+      "accessid": "access1",
+      "recordId": "record1",
+      "userid": "student1",
+      "viewername": "student1",
+      "viewertoken": "token1"
+    }
   }
 }

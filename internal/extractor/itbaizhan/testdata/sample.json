@@ -1,7 +1,31 @@
 {
   "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
-  }
+  "data": [
+    {
+      "identity": 1,
+      "type": {
+        "type_name": "第一阶段"
+      },
+      "specific": [
+        {
+          "s_id": 101,
+          "s_name": "第一章",
+          "child": [
+            {
+              "course_id": 1001,
+              "course_name": "百战示例视频",
+              "video_time": "12:00",
+              "is_free": 1
+            }
+          ],
+          "training": [
+            {
+              "t_id": 2001,
+              "t_name": "示例资料"
+            }
+          ]
+        }
+      ]
+    }
+  ]
 }

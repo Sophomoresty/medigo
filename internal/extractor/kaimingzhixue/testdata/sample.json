@@ -1,7 +1,24 @@
 {
-  "code": 0,
+  "code": 200,
   "data": {
-    "title": "test_course",
-    "list": []
+    "course": {
+      "id": 1001,
+      "title": "开明智学示例课程",
+      "course_type": 1
+    },
+    "chapter": [
+      {
+        "id": 201,
+        "title": "第一章",
+        "children": [
+          {
+            "course_chapter_id": 301,
+            "title": "示例点播",
+            "video_id": "bjy-video-1",
+            "type": "video"
+          }
+        ]
+      }
+    ]
   }
 }

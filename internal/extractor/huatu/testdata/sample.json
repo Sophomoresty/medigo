@@ -1,7 +1,16 @@
 {
-  "code": 0,
+  "code": 10000,
+  "msg": "success",
   "data": {
-    "title": "test_course",
-    "list": []
+    "list": [
+      {
+        "goodsNum": "HT2026001",
+        "goodsName": "华图示例课程",
+        "title": "华图示例课程",
+        "actualPrice": 0,
+        "courseStatusName": "学习中"
+      }
+    ],
+    "pageCount": 1
   }
 }

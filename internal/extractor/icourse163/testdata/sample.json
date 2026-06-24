@@ -1,7 +1,29 @@
 {
   "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "result": {
+    "mocTermDto": {
+      "id": 1001,
+      "courseName": "中国大学MOOC示例课程",
+      "chapters": [
+        {
+          "id": 2001,
+          "name": "第一章",
+          "lessons": [
+            {
+              "id": 3001,
+              "name": "第一节",
+              "units": [
+                {
+                  "id": 4001,
+                  "contentId": 5001,
+                  "contentType": 1,
+                  "name": "示例视频"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
   }
 }

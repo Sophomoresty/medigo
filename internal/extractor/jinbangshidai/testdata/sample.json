@@ -1,7 +1,19 @@
 {
   "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "info": {
+    "name": "金榜时代示例课程",
+    "price": 0,
+    "syllabusList": [
+      {
+        "name": "第一章",
+        "list": [
+          {
+            "name": "示例讲义.pdf",
+            "type": 4,
+            "docUrl": "https://cdn.vkbrother.com/course/jb-demo.pdf"
+          }
+        ]
+      }
+    ]
   }
 }

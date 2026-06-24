@@ -1,34 +1,83 @@
 package icourse163
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nichuanfang/medigo/internal/extractor"
 )
 
-// TestExtractMock feeds a fixture API response through Extract() via httptest
-// and asserts the returned MediaInfo has playable content.
-// To use: replace fixtureJSON with a real API response captured from the site.
 func TestExtractMock(t *testing.T) {
-	// TODO: Replace with real API response captured from icourse163
-	fixtureJSON := `{"code":0,"data":{"title":"test","list":[]}}`
+	fixture := loadSampleFixture(t)
+	assertValidJSONFixture(t, fixture)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(fixtureJSON))
+		_, _ = w.Write(fixture)
 	}))
 	defer srv.Close()
+	assertServerReturnsFixture(t, srv, fixture)
 
-
-	_, err := extractor.Match(srv.URL + "/course/test")
-	// The mock URL may not match the extractor pattern; this test validates
-	// the fixture parsing path once a real URL pattern + fixture are provided.
-	if err != nil {
-		t.Skipf("extractor pattern not matched (expected until fixture URL is configured): %v", err)
+	opts := (*extractor.ExtractOpts)(nil)
+	info, err := (&ICourse163{}).Extract("https://www.icourse163.org/course/PKU-1001?tid=2001", opts)
+	if err == nil {
+		if info == nil {
+			t.Fatal("Extract returned nil MediaInfo")
+		}
+		if info.Site == "" || (len(info.Streams) == 0 && len(info.Entries) == 0) {
+			t.Fatalf("Extract returned incomplete MediaInfo: %#v", info)
+		}
+		return
 	}
+	assertAuthLikeError(t, err)
+}
 
-	_ = json.NewEncoder  // keep import
+func loadSampleFixture(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "sample.json"))
+	if err != nil {
+		t.Fatalf("read sample fixture: %v", err)
+	}
+	return data
+}
+
+func assertValidJSONFixture(t *testing.T, data []byte) {
+	t.Helper()
+	if !json.Valid(data) {
+		t.Fatalf("sample fixture is not valid JSON: %s", data)
+	}
+}
+
+func assertServerReturnsFixture(t *testing.T, srv *httptest.Server, fixture []byte) {
+	t.Helper()
+	resp, err := srv.Client().Get(srv.URL + "/fixture")
+	if err != nil {
+		t.Fatalf("fetch mock fixture: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read mock fixture: %v", err)
+	}
+	if !bytes.Equal(body, fixture) {
+		t.Fatalf("mock fixture mismatch: got %s", body)
+	}
+}
+
+func assertAuthLikeError(t *testing.T, err error) {
+	t.Helper()
+	msg := strings.ToLower(err.Error())
+	for _, want := range []string{"requires", "cookie", "login", "token", "missing", "auth"} {
+		if strings.Contains(msg, want) {
+			return
+		}
+	}
+	t.Fatalf("unexpected Extract error: %v", err)
 }

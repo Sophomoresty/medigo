@@ -1,7 +1,17 @@
 {
   "code": 0,
+  "success": true,
   "data": {
-    "title": "test_course",
-    "list": []
+    "records": [
+      {
+        "commodityId": "JT1001",
+        "classTypeId": "CT2001",
+        "courseName": "精通学示例课程",
+        "classTypePo": {
+          "id": "CT2001",
+          "name": "精通学示例班型"
+        }
+      }
+    ]
   }
 }

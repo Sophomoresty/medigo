@@ -1,7 +1,19 @@
 {
   "code": 0,
+  "success": true,
+  "msg": "success",
   "data": {
-    "title": "test_course",
-    "list": []
+    "courseName": "爱课程示例课程",
+    "schoolName": "示例大学",
+    "teacherName": "示例教师",
+    "resourcesList": [
+      {
+        "resId": "res-video-1",
+        "resName": "第一讲 示例视频",
+        "resMediaType": "video",
+        "resUrl": "https://media.icourses.cn/video/demo.m3u8",
+        "fileSize": 12345
+      }
+    ]
   }
 }

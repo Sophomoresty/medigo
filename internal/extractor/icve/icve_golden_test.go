@@ -1,34 +1,100 @@
 package icve
 
 import (
+	"context"
+	"crypto/tls"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nichuanfang/medigo/internal/extractor"
 )
 
-// TestExtractMock feeds a fixture API response through Extract() via httptest
-// and asserts the returned MediaInfo has playable content.
-// To use: replace fixtureJSON with a real API response captured from the site.
 func TestExtractMock(t *testing.T) {
-	// TODO: Replace with real API response captured from icve
-	fixtureJSON := `{"code":0,"data":{"title":"test","list":[]}}`
+	fixture := loadSampleFixture(t)
+	assertValidJSONFixture(t, fixture)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	installMockHTTPSTransport(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(fixtureJSON))
+		switch {
+		case r.Host == "ai.icve.com.cn" && strings.Contains(r.URL.Path, "/course/courseInfo/getLatestInfoByCourseId"):
+			writeJSON(t, w, map[string]any{"data": map[string]any{"id": "info-1", "courseName": "ICVE示例课程", "schoolName": "示例学院"}})
+		case r.Host == "ai.icve.com.cn" && strings.Contains(r.URL.Path, "/course/courseDesign/getDesignList"):
+			_, _ = w.Write(fixture)
+		case r.Host == "ai.icve.com.cn" && strings.Contains(r.URL.Path, "/course/courseDesign/getCellList"):
+			writeJSON(t, w, map[string]any{"data": []any{}})
+		default:
+			http.Error(w, "unexpected mock request", http.StatusNotFound)
+			t.Errorf("unexpected mock request: host=%s path=%s rawQuery=%s", r.Host, r.URL.Path, r.URL.RawQuery)
+		}
 	}))
-	defer srv.Close()
 
-
-	_, err := extractor.Match(srv.URL + "/course/test")
-	// The mock URL may not match the extractor pattern; this test validates
-	// the fixture parsing path once a real URL pattern + fixture are provided.
+	info, err := (&Icve{}).Extract("https://ai.icve.com.cn/course/detail/icve-demo", &extractor.ExtractOpts{Quality: "hd"})
 	if err != nil {
-		t.Skipf("extractor pattern not matched (expected until fixture URL is configured): %v", err)
+		t.Fatalf("Extract returned error: %v", err)
 	}
+	if info == nil {
+		t.Fatal("Extract returned nil MediaInfo")
+	}
+	if info.Site != "icve" {
+		t.Fatalf("Site = %q, want icve", info.Site)
+	}
+	if len(info.Streams) == 0 {
+		t.Fatalf("expected stream entry, got %#v", info)
+	}
+	stream := info.Streams["mp4"]
+	if len(stream.URLs) != 1 || !strings.Contains(stream.URLs[0], "icve-demo.mp4") {
+		t.Fatalf("unexpected stream URLs: %#v", stream.URLs)
+	}
+}
 
-	_ = json.NewEncoder  // keep import
+func loadSampleFixture(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "sample.json"))
+	if err != nil {
+		t.Fatalf("read sample fixture: %v", err)
+	}
+	return data
+}
+
+func assertValidJSONFixture(t *testing.T, data []byte) {
+	t.Helper()
+	if !json.Valid(data) {
+		t.Fatalf("sample fixture is not valid JSON: %s", data)
+	}
+}
+
+func writeJSON(t *testing.T, w http.ResponseWriter, v any) {
+	t.Helper()
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		t.Fatalf("write mock JSON: %v", err)
+	}
+}
+
+func installMockHTTPSTransport(t *testing.T, handler http.Handler) {
+	t.Helper()
+	srv := httptest.NewTLSServer(handler)
+	old := http.DefaultTransport
+	base, ok := old.(*http.Transport)
+	if !ok {
+		srv.Close()
+		t.Fatalf("http.DefaultTransport has type %T, want *http.Transport", old)
+	}
+	transport := base.Clone()
+	transport.Proxy = nil
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, srv.Listener.Addr().String())
+	}
+	http.DefaultTransport = transport
+	t.Cleanup(func() {
+		http.DefaultTransport = old
+		srv.Close()
+	})
 }

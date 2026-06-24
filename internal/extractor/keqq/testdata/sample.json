@@ -1,7 +1,36 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "props": {
+    "pageProps": {
+      "courseInfo": {
+        "data": {
+          "basic_info": {
+            "course_name": "腾讯课堂示例课程",
+            "price": 0
+          },
+          "pay_market_info": {
+            "user_term_pay_info_list": [
+              "987654"
+            ]
+          },
+          "catalogMap": {
+            "987654": [
+              {
+                "index": 1,
+                "name": "第一章",
+                "task_info": [
+                  {
+                    "type": 3,
+                    "taid": "ta1",
+                    "resid_list": "cw1",
+                    "aid": "a1",
+                    "name": "课程讲义.pdf"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
   }
 }
