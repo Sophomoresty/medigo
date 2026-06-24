@@ -1,7 +1,46 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "source": "Mooc/Courses/Aishangke/Aishangke_Course.pyc.1shot.cdc.py",
+  "login_user": {
+    "code": 1,
+    "data": {
+      "id": 1,
+      "nickname": "fixture"
+    }
+  },
+  "course_detail": {
+    "code": 1,
+    "data": {
+      "id": 1001,
+      "title": "Aishangke Fixture Course",
+      "course_list": [
+        {
+          "id": 2002,
+          "course_id": 2002,
+          "title": "Lesson One",
+          "is_free": 1,
+          "video_type": "cc"
+        }
+      ]
+    }
+  },
+  "course_room_html": "<script>let ccInfo = {roomid:\"room-1\", userid:\"user-1\", viewername:\"fixture\"}</script>",
+  "cssl_login": {
+    "result": true,
+    "data": {
+      "sessionid": "cssl-session"
+    }
+  },
+  "cssl_play": {
+    "result": true,
+    "data": {
+      "video": {
+        "copy": [
+          {
+            "quality": "720p",
+            "url": "https://cdn.example/aishangke.mp4"
+          }
+        ]
+      }
+    }
   }
 }

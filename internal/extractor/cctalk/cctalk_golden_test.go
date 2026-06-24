@@ -1,4 +1,4 @@
-package cnmooc
+package cctalk
 
 import (
 	"bytes"
@@ -22,11 +22,11 @@ func TestExtractMock(t *testing.T) {
 	defer srv.Close()
 	assertFixtureServed(t, srv.URL, fixture)
 
-	ext, err := extractor.Match("https://cnmooc.sjtu.cn/portal/course/1001/2002.mooc")
+	ext, err := extractor.Match("https://www.cctalk.com/m/group/123456")
 	if err != nil {
 		t.Fatalf("extractor pattern should match fixture URL: %v", err)
 	}
-	info, err := ext.Extract("https://cnmooc.sjtu.cn/portal/course/1001/2002.mooc", nil)
+	info, err := ext.Extract("https://www.cctalk.com/m/group/123456", nil)
 	if err == nil {
 		t.Fatalf("expected login-cookie error, got info: %#v", info)
 	}

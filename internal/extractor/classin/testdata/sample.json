@@ -1,7 +1,17 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "source": "Mooc/Courses/Classin/Classin_Course.pyc.1shot.cdc.py",
+  "record_get": {
+    "error_info": {
+      "errno": 1,
+      "msg": "ok"
+    },
+    "data": {
+      "records": [
+        {
+          "lessonName": "ClassIn Fixture Lesson",
+          "mp4_url": "https://cdn.example/classin.mp4"
+        }
+      ]
+    }
   }
 }

@@ -1,7 +1,18 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "source": "Mooc/Courses/Ahu/Ahu_Course.pyc.1shot.cdc.py",
+  "course_info_html": "<html><head><title>AHU Fixture Course</title></head><body><a href=\"/video/videoplay.html?courseId=1001&lessonId=2002#aliyun\">Lesson One</a></body></html>",
+  "video_play_html": "<script>var play = {\"VideoId\":\"aliyun-video-1\",\"PlayAuth\":\"play-auth-1\"};</script>",
+  "aliyun_playauth": {
+    "VideoMeta": {
+      "Title": "Lesson One"
+    },
+    "PlayInfoList": {
+      "PlayInfo": [
+        {
+          "PlayURL": "https://cdn.example/ahu.mp4",
+          "Format": "mp4"
+        }
+      ]
+    }
   }
 }

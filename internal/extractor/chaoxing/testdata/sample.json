@@ -1,7 +1,15 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
-  }
+  "source": "Mooc/Courses/Chaoxing/Chaoxing_Course.pyc.1shot.cdc.py",
+  "course_page_html": "<html><head><title>Chaoxing Fixture Course</title></head><body><input id=\"courseId\" value=\"1001\"><input id=\"clazzid\" value=\"2002\"><div class=\"chapter_item\" title=\"Lesson One\" onclick=\"toOld('1001','3003','1')\"></div></body></html>",
+  "cards_html": "<script>mArg = {\"attachments\":[{\"property\":{\"name\":\"Lesson One.mp4\",\"objectid\":\"object-1\",\"mid\":\"mid-1\",\"type\":\".mp4\"}}]};</script>",
+  "ananas_status": {
+    "filename": "Lesson One.mp4",
+    "download": "https://cdn.example/chaoxing.mp4",
+    "httphd": "https://cdn.example/chaoxing-hd.mp4"
+  },
+  "subtitle": [
+    {
+      "url": "https://cdn.example/chaoxing.srt"
+    }
+  ]
 }

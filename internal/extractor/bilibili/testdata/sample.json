@@ -1,7 +1,43 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "source": "Mooc/Courses/Bilibili/Bilibili_Course.pyc.1shot.cdc.py",
+  "view": {
+    "code": 0,
+    "message": "0",
+    "data": {
+      "bvid": "BV1xx411c7mD",
+      "title": "Bilibili Fixture Video",
+      "owner": {
+        "name": "fixture-owner"
+      },
+      "pages": [
+        {
+          "cid": 100200,
+          "part": "P1"
+        }
+      ]
+    }
+  },
+  "playurl": {
+    "code": 0,
+    "data": {
+      "dash": {
+        "video": [
+          {
+            "id": 80,
+            "baseUrl": "https://cdn.example/bilibili-video.m4s",
+            "bandwidth": 800000,
+            "width": 1920,
+            "height": 1080
+          }
+        ],
+        "audio": [
+          {
+            "id": 30280,
+            "baseUrl": "https://cdn.example/bilibili-audio.m4s",
+            "bandwidth": 128000
+          }
+        ]
+      }
+    }
   }
 }

@@ -1,7 +1,31 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "source": "Mooc/Courses/Baijiayunxiao/Baijiayunxiao_Course.pyc.1shot.cdc.py",
+  "course_info": {
+    "code": 0,
+    "data": {
+      "id": 1001,
+      "name": "Baijiayunxiao Fixture Course",
+      "chapter_list": [
+        {
+          "id": "chap-1",
+          "name": "Playback One"
+        }
+      ]
+    }
+  },
+  "room_code": {
+    "code": 0,
+    "data": {
+      "room_id": "room-1",
+      "token": "room-token"
+    }
+  },
+  "play_info": {
+    "code": 0,
+    "data": {
+      "video": {
+        "play_url": "https://cdn.example/baijiayunxiao.mp4"
+      }
+    }
   }
 }

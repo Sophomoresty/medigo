@@ -1,7 +1,33 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "source": "Mooc/Courses/Caixuetang/Caixuetang_Course.pyc.1shot.cdc.py",
+  "memberinfo": {
+    "code": 0,
+    "data": {
+      "member_id": "member-1",
+      "nickname": "fixture"
+    }
+  },
+  "mycourse": {
+    "code": 0,
+    "data": {
+      "list": [
+        {
+          "id": "1001",
+          "title": "Caixuetang Fixture Course",
+          "course_type": "video"
+        }
+      ]
+    }
+  },
+  "playinfo": {
+    "code": 0,
+    "data": {
+      "chapter": [
+        {
+          "title": "Lesson One",
+          "video_url": "https://cdn.example/caixuetang.mp4"
+        }
+      ]
+    }
   }
 }

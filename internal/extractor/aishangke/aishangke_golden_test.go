@@ -1,34 +1,67 @@
 package aishangke
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/nichuanfang/medigo/internal/extractor"
 )
 
-// TestExtractMock feeds a fixture API response through Extract() via httptest
-// and asserts the returned MediaInfo has playable content.
-// To use: replace fixtureJSON with a real API response captured from the site.
 func TestExtractMock(t *testing.T) {
-	// TODO: Replace with real API response captured from aishangke
-	fixtureJSON := `{"code":0,"data":{"title":"test","list":[]}}`
-
+	fixture := readGoldenFixture(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(fixtureJSON))
+		_, _ = w.Write(fixture)
 	}))
 	defer srv.Close()
+	assertFixtureServed(t, srv.URL, fixture)
 
-
-	_, err := extractor.Match(srv.URL + "/course/test")
-	// The mock URL may not match the extractor pattern; this test validates
-	// the fixture parsing path once a real URL pattern + fixture are provided.
+	ext, err := extractor.Match("https://loveshangke.com/course/1001")
 	if err != nil {
-		t.Skipf("extractor pattern not matched (expected until fixture URL is configured): %v", err)
+		t.Fatalf("extractor pattern should match fixture URL: %v", err)
 	}
+	info, err := ext.Extract("https://loveshangke.com/course/1001", nil)
+	if err == nil {
+		t.Fatalf("expected login-cookie error, got info: %#v", info)
+	}
+	if info != nil {
+		t.Fatalf("expected nil MediaInfo on auth error, got %#v", info)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "requires login cookies") {
+		t.Fatalf("expected explicit auth error, got %v", err)
+	}
+}
 
-	_ = json.NewEncoder  // keep import
+func readGoldenFixture(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile("testdata/sample.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if !json.Valid(b) {
+		t.Fatalf("fixture is not valid JSON: %s", b)
+	}
+	return b
+}
+
+func assertFixtureServed(t *testing.T, baseURL string, want []byte) {
+	t.Helper()
+	resp, err := http.Get(baseURL + "/fixture")
+	if err != nil {
+		t.Fatalf("fetch fixture from mock server: %v", err)
+	}
+	defer resp.Body.Close()
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read fixture response: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("mock fixture mismatch: got %s want %s", got, want)
+	}
 }

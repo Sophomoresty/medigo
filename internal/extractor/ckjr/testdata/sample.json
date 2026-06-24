@@ -1,7 +1,39 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "source": "Mooc/Courses/Ckjr/Ckjr_Course.pyc.1shot.cdc.py",
+  "marketing_award": {
+    "code": 200,
+    "data": {
+      "list": [
+        {
+          "prodId": 1001,
+          "prodName": "CKJR Fixture Course"
+        }
+      ]
+    }
+  },
+  "course_detail": {
+    "code": 200,
+    "data": {
+      "title": "CKJR Fixture Course",
+      "sections": [
+        {
+          "title": "Lesson One",
+          "videoUrl": "https://cdn.example/ckjr.mp4"
+        }
+      ]
+    }
+  },
+  "qcloud_playinfo": {
+    "code": 0,
+    "media": {
+      "basicInfo": {
+        "name": "Lesson One"
+      },
+      "streamingInfo": {
+        "plainOutput": {
+          "url": "https://cdn.example/ckjr.mp4"
+        }
+      }
+    }
   }
 }

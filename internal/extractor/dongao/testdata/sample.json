@@ -1,7 +1,25 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "source": "Mooc/Courses/Dongao/Dongao_Course.pyc.1shot.cdc.py",
+  "stage_list": {
+    "code": 0,
+    "data": {
+      "courseName": "Dongao Fixture Course",
+      "lectures": [
+        {
+          "lectureId": "2002",
+          "lectureName": "Lesson One"
+        }
+      ]
+    }
+  },
+  "lecture_page_html": "<html><h1>Lesson One</h1><script>var playUrl=\"https://cdn.example/dongao.m3u8\";</script></html>",
+  "live_number_list": {
+    "code": 0,
+    "data": [
+      {
+        "lectureId": "2002",
+        "videoUrl": "https://cdn.example/dongao.mp4"
+      }
+    ]
   }
 }

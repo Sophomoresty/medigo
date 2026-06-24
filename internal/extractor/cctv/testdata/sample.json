@@ -1,7 +1,9 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "source": "Mooc/Courses/Cctv/Cctv_Course.pyc.1shot.cdc.py",
+  "page_html": "<html><head><meta property=\"og:title\" content=\"CCTV Fixture Video\"></head><body><script>var guid=\"0123456789abcdef0123456789abcdef\";</script></body></html>",
+  "video_info": {
+    "status": "001",
+    "title": "CCTV Fixture Video",
+    "video_url": "https://cdn.example/cctv.mp4"
   }
 }

@@ -1,7 +1,24 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "source": "Mooc/Courses/Cto51/Cto51_Course.pyc.1shot.cdc.py",
+  "course_page_html": "<html><h1>51CTO Fixture Course</h1><a href=\"/lesson/2002.html\">Lesson One</a></html>",
+  "lesson_list": {
+    "status": 1,
+    "data": [
+      {
+        "lesson_id": 2002,
+        "title": "Lesson One"
+      }
+    ]
+  },
+  "vod_play_auth": {
+    "code": 0,
+    "data": {
+      "playInfoList": [
+        {
+          "definition": "HD",
+          "playURL": "https://cdn.example/cto51.mp4"
+        }
+      ]
+    }
   }
 }

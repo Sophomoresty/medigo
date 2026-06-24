@@ -1,7 +1,11 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "source": "Mooc/Courses/Cnmooc/Cnmooc_Course.pyc.1shot.cdc.py",
+  "course_page_html": "<html><head><title>CNMOOC Fixture Course</title></head><body><input name=\"courseId\" value=\"1001\"><input name=\"courseOpenId\" value=\"2002\"><a href=\"https://cdn.example/cnmooc.mp4\">Lesson One</a></body></html>",
+  "item_detail": {
+    "result": true,
+    "data": {
+      "name": "Lesson One",
+      "url": "https://cdn.example/cnmooc.mp4"
+    }
   }
 }

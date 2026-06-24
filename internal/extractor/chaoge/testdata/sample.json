@@ -1,7 +1,48 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "source": "Mooc/Courses/Chaoge/Chaoge_Course.pyc.1shot.cdc.py",
+  "login_user": {
+    "code": 1,
+    "data": {
+      "id": 1,
+      "nickname": "fixture"
+    }
+  },
+  "course_detail": {
+    "code": 1,
+    "data": {
+      "id": 1001,
+      "title": "Chaoge Fixture Course",
+      "course_list": [
+        {
+          "id": 2002,
+          "course_id": 2002,
+          "title": "Lesson One",
+          "is_free": 1,
+          "video_type": "cc"
+        }
+      ]
+    }
+  },
+  "course_files": {
+    "code": 1,
+    "data": [
+      {
+        "title": "Courseware",
+        "url": "https://cdn.example/chaoge.pdf"
+      }
+    ]
+  },
+  "cssl_play": {
+    "result": true,
+    "data": {
+      "video": {
+        "copy": [
+          {
+            "quality": "720p",
+            "url": "https://cdn.example/chaoge.mp4"
+          }
+        ]
+      }
+    }
   }
 }

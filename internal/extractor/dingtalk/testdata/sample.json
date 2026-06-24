@@ -1,7 +1,15 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
-  }
+  "source": "Mooc/Courses/Dingtalk/Dingtalk_Course.pyc.1shot.cdc.py",
+  "live_share": {
+    "roomId": "1001",
+    "liveUuid": "2002",
+    "title": "DingTalk Fixture Replay"
+  },
+  "preset": {
+    "data": {
+      "name": "Fixture Document",
+      "dentryKey": "dentry-1"
+    }
+  },
+  "blocked_reason": "live replay requires the LWP WebSocket client in the Go port"
 }

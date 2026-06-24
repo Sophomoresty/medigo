@@ -1,7 +1,22 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "source": "Mooc/Courses/cctalk/Cctalk_Course.pyc.1shot.cdc.py",
+  "group_video_list": {
+    "code": 0,
+    "data": {
+      "items": [
+        {
+          "videoId": "987654",
+          "title": "CCTalk Fixture Lesson",
+          "mediaUrl": "https://cdn.example/cctalk.mp4"
+        }
+      ]
+    }
+  },
+  "video_play_info": {
+    "code": 0,
+    "data": {
+      "title": "CCTalk Fixture Lesson",
+      "url": "https://cdn.example/cctalk.mp4"
+    }
   }
 }
