@@ -45,17 +45,22 @@ func (z *Zhihuishu) Extract(rawURL string, opts *extractor.ExtractOpts) (*extrac
 
 	videoID := extractVideoID(rawURL)
 	if videoID == "" {
-		return nil, fmt.Errorf("zhihuishu course-tree traversal needs HTML scraping that's not implemented (please pass a videoID URL)")
+		courseID := extractCourseHomeID(rawURL)
+		if courseID == "" {
+			return nil, fmt.Errorf("cannot parse zhihuishu URL: %s", rawURL)
+		}
+		return extractCourseHomeCourse(rawURL, courseID, opts)
 	}
 
 	c := util.NewClient()
 	c.SetCookieJar(opts.Cookies)
-	h := map[string]string{"Referer": "https://onlineweb.zhihuishu.com/"}
+	h := zhihuishuHeaders("https://www.zhihuishu.com/")
 
 	url, err := getVideoURL(c, videoID, h)
 	if err != nil {
 		return nil, err
 	}
+	subURL, _ := getSubtitleURL(c, videoID, h)
 
 	return &extractor.MediaInfo{
 		Site:  "zhihuishu",
@@ -68,6 +73,7 @@ func (z *Zhihuishu) Extract(rawURL string, opts *extractor.ExtractOpts) (*extrac
 				Headers: h,
 			},
 		},
+		Subtitles: subtitleFromURL(subURL),
 	}, nil
 }
 
@@ -122,8 +128,9 @@ func getVideoURL(c *util.Client, videoID string, h map[string]string) (string, e
 }
 
 var (
-	videoIDRe = regexp.MustCompile(`(?i)videoID=([\w-]+)`)
-	vidRe2    = regexp.MustCompile(`/video/(?:initVideo\?videoID=)?([\w-]{8,})`)
+	videoIDRe      = regexp.MustCompile(`(?i)videoID=([\w-]+)`)
+	vidRe2         = regexp.MustCompile(`/video/(?:initVideo\?videoID=)?([\w-]{8,})`)
+	courseHomeIDRe = regexp.MustCompile(`(?i)(?:courseHome/|[?&](?:courseId|proCourseId)=)(\d+)`)
 )
 
 func extractVideoID(u string) string {
@@ -136,9 +143,20 @@ func extractVideoID(u string) string {
 	return ""
 }
 
+func extractCourseHomeID(u string) string {
+	if m := courseHomeIDRe.FindStringSubmatch(u); len(m) > 1 {
+		return m[1]
+	}
+	return ""
+}
+
 func pickFormat(u string) string {
 	if strings.Contains(u, ".m3u8") {
 		return "m3u8"
 	}
 	return "mp4"
+}
+
+func zhihuishuHeaders(referer string) map[string]string {
+	return map[string]string{"Referer": referer}
 }
