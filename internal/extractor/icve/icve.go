@@ -15,20 +15,22 @@ import (
 )
 
 const (
-	COURSENAME        = "{1}--课程"
-	FILENAME          = "{2}--资源"
-	MATERIAL          = "【全部素材】"
-	IS_HD             = 1
-	IS_SD             = 2
-	ONLY_PDF          = 3
-	LEN_S             = 96
-	LEN_              = 48
-	TIME_SLEEP        = 3.6
-	referer           = "https://www.icve.com.cn"
-	url_title         = "https://ai.icve.com.cn/prod-api/course/courseInfo/getLatestInfoByCourseId?courseId=%s"
-	url_info          = "https://ai.icve.com.cn/prod-api/course/courseDesign/getDesignList?courseInfoId=%s&courseId=%s"
-	url_cell          = "https://ai.icve.com.cn/prod-api/course/courseDesign/getCellList?courseInfoId=%s&courseId=%s&parentId=%s"
-	url_source_status = "https://upload.icve.com.cn/%s/status"
+	COURSENAME         = "{1}--课程"
+	FILENAME           = "{2}--资源"
+	MATERIAL           = "【全部素材】"
+	IS_HD              = 1
+	IS_SD              = 2
+	ONLY_PDF           = 3
+	LEN_S              = 96
+	LEN_               = 48
+	TIME_SLEEP         = 3.6
+	referer            = "https://www.icve.com.cn"
+	smartedu_referer   = "https://vocational.smartedu.cn"
+	url_title          = "https://ai.icve.com.cn/prod-api/course/courseInfo/getLatestInfoByCourseId?courseId=%s"
+	url_info           = "https://ai.icve.com.cn/prod-api/course/courseDesign/getDesignList?courseInfoId=%s&courseId=%s"
+	url_cell           = "https://ai.icve.com.cn/prod-api/course/courseDesign/getCellList?courseInfoId=%s&courseId=%s&parentId=%s"
+	url_source_status  = "https://upload.icve.com.cn/%s/status"
+	smartedu_query_url = "https://vocational.smartedu.cn/gjzyjy/inco/ht/queryList"
 )
 
 var patterns = []string{`\s*((https?://ai\.icve\.com\.cn/.*?excellent.*?/(?P<cid1>[-\w]+))|(https?://ai\.icve\.com\.cn/.*?course.*?/(?P<cid2>[-\w]+)))`}

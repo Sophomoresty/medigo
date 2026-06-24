@@ -39,6 +39,17 @@ const (
 	timestampURL = "https://acs.m.taobao.com/gw/mtop.common.getTimestamp/"
 )
 
+// Source URL constants preserved from Mooc163 sibling flows that this package
+// explicitly rejects today but must keep source-visible domains aligned.
+const (
+	hep_api                = "https://etextbook.hep.com.cn/ebookapi"
+	course_site            = "https://ke.youdao.com"
+	course_list_url        = "https://ke.youdao.com/course/app/mycoursev3.json?courseStatus=%s&page=%s"
+	new_video_url          = "https://ke.youdao.com/course/detail/getLessonInfo2.json?courseId=%s&lessonId=%s"
+	youdao_login_check_url = "https://dict.youdao.com/login/acc/co/cq?product=DICT"
+	youdao_test_course_url = "https://ke.youdao.com/course/detail/220912?loginBack=true&Pdt=jpkWeb"
+)
+
 // Patterns chosen to intersect with Mooc_Config.courses_re['Icourse163_Mooc']:
 //
 //	\s*https?://www\.icourse163\.org/(?P<mooc>.*?)((learn)|(course))/(?P<cid1>(?!kaopei-)[\%\w-]*-\d+)(.*?tid=(?P<tid1>\d+))?
