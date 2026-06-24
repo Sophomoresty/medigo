@@ -1,7 +1,60 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "__default": {
+    "code": 0,
+    "data": {},
+    "courseList": [],
+    "courseChapterList": [],
+    "files": []
+  },
+  "GET /api/ark/web/v1/user/course/course-list": {
+    "data": [
+      {
+        "id": 3001,
+        "productCurriculumId": 4001,
+        "productName": "Qihang Mock Course"
+      }
+    ]
+  },
+  "GET /api/ark/web/v1/course/catalog/4001": {
+    "data": {
+      "courseNodes": [
+        {
+          "name": "Qihang Mock Live",
+          "studyResourceType": 3,
+          "resourceList": [
+            {
+              "resourceId": "LIVE1"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "GET /api/ark/web/v1/lecture/curriculum/node": {
+    "data": []
+  },
+  "GET /api/ark/web/v1/user/course/live/replay": {
+    "data": {
+      "replayUrl": "https://view.csslcloud.net/api/room/replay/login?roomid=ROOM1&userid=ACC1&recordid=REC1"
+    }
+  },
+  "POST /api/room/replay/login": {
+    "result": "OK",
+    "datas": {
+      "sessionId": "SESSION1"
+    }
+  },
+  "GET /api/record/vod": {
+    "data": {
+      "vod_info": {
+        "video": [
+          {
+            "url": "https://media.example.com/qihang/replay.mp4",
+            "definition": 720
+          }
+        ],
+        "audio": []
+      }
+    }
   }
 }

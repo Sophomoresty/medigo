@@ -1,7 +1,54 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "__default": {
+    "code": 0,
+    "data": {},
+    "courseList": [],
+    "courseChapterList": [],
+    "files": []
+  },
+  "GET /api/v1/auth/token/": {
+    "code": 200,
+    "data": {
+      "username": "mock"
+    }
+  },
+  "GET /api/v1/study/courses/": {
+    "code": 200,
+    "data": []
+  },
+  "GET /api/v1/study/category-courses/": {
+    "code": 200,
+    "data": []
+  },
+  "GET /api/v1/course/free/": {
+    "code": 200,
+    "data": []
+  },
+  "GET /api/v1/course/actual/": {
+    "code": 200,
+    "data": []
+  },
+  "GET /api/v1/course/degree/": {
+    "code": 200,
+    "data": []
+  },
+  "GET /api/v1/course/actual/1001/": {
+    "code": 200,
+    "data": {
+      "name": "Luffycity Mock Course"
+    }
+  },
+  "GET /api/v1/course/actual/1001/sections/": {
+    "code": 200,
+    "data": {
+      "sections": [
+        {
+          "id": "2001",
+          "section_type": "video",
+          "name": "Luffycity Mock Lesson",
+          "play_url": "https://media.example.com/luffycity/lesson.mp4"
+        }
+      ]
+    }
   }
 }

@@ -1,7 +1,21 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "__default": {
+    "code": 0,
+    "data": {},
+    "courseList": [],
+    "courseChapterList": [],
+    "files": []
+  },
+  "GET /cw/ABC123": {
+    "data": {
+      "title": "Meeting Mock Replay",
+      "records": [
+        {
+          "origin_video_url": "https://media.example.com/meeting/replay.mp4",
+          "title": "Meeting Replay",
+          "recording_id": "REC1"
+        }
+      ]
+    }
   }
 }

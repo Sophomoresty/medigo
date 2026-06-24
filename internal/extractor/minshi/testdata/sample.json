@@ -1,7 +1,60 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "__default": {
+    "code": 0,
+    "data": {},
+    "courseList": [],
+    "courseChapterList": [],
+    "files": []
+  },
+  "POST /api/learning/ext/course/my": {
+    "code": 0,
+    "data": [
+      {
+        "courseId": "1001",
+        "title": "Minshi Mock Course"
+      }
+    ]
+  },
+  "GET /api/learning/ext/courseDetails/new/courseTableInfo/1001": {
+    "code": 0,
+    "data": {
+      "title": "Minshi Mock Course",
+      "courseTableList": [
+        {
+          "courseTableId": "T1",
+          "videoId": "POLYV1",
+          "title": "Minshi Mock Lesson"
+        }
+      ]
+    }
+  },
+  "GET /api/learning/ext/course/valid/expirationDateByCourse/1001": {
+    "code": 0,
+    "data": {
+      "valid": true
+    }
+  },
+  "GET /api/learning/ext/course/videoEncryptedInfo/POLYV1": {
+    "code": 0,
+    "data": {
+      "videoId": "POLYV1",
+      "playsafe": "TOKEN1"
+    }
+  },
+  "GET /secure/POLYV1.json": {
+    "code": 200,
+    "data": {
+      "playsafe": {
+        "token": "TOKEN1"
+      },
+      "paths": [
+        "https://media.example.com/minshi/lesson.m3u8"
+      ],
+      "encrypted": false
+    }
+  },
+  "POST /api/learning/ext/class/material/list": {
+    "code": 0,
+    "data": []
   }
 }

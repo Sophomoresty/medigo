@@ -1,7 +1,37 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "__default": {
+    "code": 0,
+    "data": {},
+    "courseList": [],
+    "courseChapterList": [],
+    "files": []
+  },
+  "GET /liveapi/entry/getReplayInfo": {
+    "replay": {
+      "liveRoomId": "ROOM1",
+      "accessid": "ACC1",
+      "recordId": "REC1",
+      "accesskey": "TOKEN1"
+    },
+    "token": "TOKEN1"
+  },
+  "POST /api/room/replay/login": {
+    "result": "OK",
+    "datas": {
+      "sessionId": "SESSION1"
+    }
+  },
+  "GET /api/record/vod": {
+    "data": {
+      "vod_info": {
+        "video": [
+          {
+            "url": "https://media.example.com/med66/replay.mp4",
+            "definition": 720
+          }
+        ],
+        "audio": []
+      }
+    }
   }
 }

@@ -1,7 +1,18 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "__default": {
+    "code": 0,
+    "data": {},
+    "courseList": [],
+    "courseChapterList": [],
+    "files": []
+  },
+  "POST /sc/nc/newGetShareInfo": {
+    "code": 0,
+    "data": {
+      "fileId": "F1",
+      "name": "Plaso Mock Lesson",
+      "url": "https://media.example.com/plaso/lesson.mp4",
+      "type": "video"
+    }
   }
 }

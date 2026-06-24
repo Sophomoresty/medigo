@@ -1,7 +1,44 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "__default": {
+    "code": 0,
+    "data": {},
+    "courseList": [],
+    "courseChapterList": [],
+    "files": []
+  },
+  "GET /uaa/user": {
+    "code": 200,
+    "data": {
+      "id": "USER1"
+    }
+  },
+  "GET /edu-course/studyProgress/ownCourse": {
+    "code": 200,
+    "data": {
+      "records": [],
+      "pages": 1
+    }
+  },
+  "GET /edu-course/ownCourse/ownPackageList": {
+    "code": 200,
+    "data": {
+      "records": [],
+      "pages": 1
+    }
+  },
+  "GET /edu-course/systemCourse/course/1001": {
+    "code": 200,
+    "data": {
+      "courseName": "Mashibing Mock Course",
+      "dataUrl": "https://media.example.com/mashibing/resource.pdf",
+      "chapterList": []
+    }
+  },
+  "GET /edu-course/courseDocumentWeb/list/pc": {
+    "code": 200,
+    "data": {
+      "records": [],
+      "pages": 1
+    }
   }
 }

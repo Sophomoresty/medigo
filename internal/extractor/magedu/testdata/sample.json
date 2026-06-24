@@ -1,7 +1,49 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "__default": {
+    "code": 0,
+    "data": {},
+    "courseList": [],
+    "courseChapterList": [],
+    "files": []
+  },
+  "GET /v1/api/ke/user/simpleInfo": {
+    "code": 200,
+    "data": {
+      "id": "USER1"
+    },
+    "success": true
+  },
+  "GET /v1/api/ke/v2/study/myList": {
+    "code": 200,
+    "data": {
+      "records": [],
+      "totalPage": 1
+    }
+  },
+  "GET /v1/api/ke/v2/curriculum/detail": {
+    "code": 200,
+    "data": {
+      "id": "1001",
+      "title": "Magedu Mock Course"
+    }
+  },
+  "GET /v1/api/ke/v2/curriculum/outline": {
+    "code": 200,
+    "data": {
+      "outlineVOList": [
+        {
+          "title": "资料章",
+          "sectionDetailList": [
+            {
+              "id": "S1",
+              "seqId": 1,
+              "sectionType": "2",
+              "title": "Magedu Mock Handout",
+              "content": "https://media.example.com/magedu/handout.pdf"
+            }
+          ]
+        }
+      ]
+    }
   }
 }

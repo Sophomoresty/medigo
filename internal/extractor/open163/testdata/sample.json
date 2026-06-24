@@ -1,7 +1,39 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "__default": {
+    "code": 0,
+    "data": {},
+    "courseList": [],
+    "courseChapterList": [],
+    "files": []
+  },
+  "GET /member/loginStatus.do": {
+    "code": 200
+  },
+  "POST /open/trade/pc/course/getCourseInfo.do": {
+    "code": 200,
+    "data": {
+      "courseInfo": {
+        "id": 1001,
+        "courseUid": "1001",
+        "title": "Open163 Mock Course"
+      },
+      "movieChapterList": [
+        {
+          "title": "Chapter 1",
+          "contentList": [
+            {
+              "title": "Open163 Mock Lesson",
+              "mediaInfoList": [
+                {
+                  "type": "hd-mp4",
+                  "mediaUrl": "https://media.example.com/open163/lesson.mp4"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "audioChapterList": []
+    }
   }
 }

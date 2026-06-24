@@ -1,7 +1,42 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "__default": {
+    "code": 0,
+    "data": {},
+    "courseList": [],
+    "courseChapterList": [],
+    "files": []
+  },
+  "POST /otm/web/course/list": {
+    "courseList": [
+      {
+        "guid": "1001",
+        "courseName": "Orangevip Mock Course",
+        "isExpire": false,
+        "totalCount": 1
+      }
+    ]
+  },
+  "POST /otm/web/course/query/coursePeriod": {
+    "courseChapterList": [
+      {
+        "chapterName": "Chapter 1",
+        "coursePeriodList": [
+          {
+            "guid": "PER1",
+            "coursePeriodTitle": "Orangevip Mock Lesson",
+            "roomId": "ROOM1"
+          }
+        ]
+      }
+    ]
+  },
+  "POST /otm/web/course/v2/reviewPlayInfo": {
+    "data": {
+      "token": "TOKEN1"
+    }
+  },
+  "GET /web/playback/getPlayInfo": "callback({\"code\":200,\"data\":{\"playback_url\":\"https://media.example.com/orangevip/lesson.m3u8\"}});",
+  "POST /otm/web/student/myCourseModelFile": {
+    "files": []
   }
 }

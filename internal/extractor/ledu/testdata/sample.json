@@ -1,7 +1,52 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "__default": {
+    "code": 0,
+    "data": {},
+    "courseList": [],
+    "courseChapterList": [],
+    "files": []
+  },
+  "GET /course/v1/student/course/subject-list": {
+    "code": 0,
+    "data": {
+      "subjects": [
+        {
+          "id": "SUB1",
+          "name": "语文"
+        }
+      ]
+    }
+  },
+  "GET /course/v1/student/course/list": {
+    "code": 0,
+    "data": {
+      "records": [
+        {
+          "classId": "CLASS1",
+          "clientCourseName": "Ledu Mock Course",
+          "pcStdCourseId": "COURSE1",
+          "gradeId": "G1"
+        }
+      ]
+    }
+  },
+  "GET /course/v1/student/course/user-live-list": {
+    "code": 0,
+    "data": {
+      "records": [
+        {
+          "liveId": "LIVE1",
+          "liveName": "Ledu Mock Lesson",
+          "detailType": "1"
+        }
+      ]
+    }
+  },
+  "GET /playback/v4/video/init": {
+    "code": 0,
+    "data": {
+      "video_name": "Ledu Mock Lesson",
+      "m3u8Url": "https://media.example.com/ledu/lesson.m3u8"
+    }
   }
 }

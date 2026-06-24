@@ -1,7 +1,44 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "__default": {
+    "code": 0,
+    "data": {},
+    "courseList": [],
+    "courseChapterList": [],
+    "files": []
+  },
+  "GET /api/product/1001": {
+    "data": {
+      "prodName": "Nmkjxy Mock Course"
+    }
+  },
+  "GET /api/video/1001": {
+    "data": {
+      "list": [
+        {
+          "videoId": "V1",
+          "videoSn": "SN1",
+          "title": "Nmkjxy Mock Lesson",
+          "chapterSn": "1",
+          "subtitleUrl": "https://media.example.com/nmkjxy/subtitle.srt"
+        }
+      ]
+    }
+  },
+  "GET /api/MyOrder/VideoPlayed": {
+    "data": {
+      "playInfoList": [
+        {
+          "definition": "HD",
+          "playURL": "https://media.example.com/nmkjxy/lesson.mp4",
+          "size": 2048
+        }
+      ]
+    }
+  },
+  "GET /api/V310/Courseware/1001": {
+    "data": []
+  },
+  "GET /api/Courseware/1001": {
+    "data": []
   }
 }

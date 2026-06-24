@@ -1,7 +1,53 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "__default": {
+    "code": 0,
+    "data": {},
+    "courseList": [],
+    "courseChapterList": [],
+    "files": []
+  },
+  "GET /oauth2/check_token": {
+    "code": 0,
+    "is_valid": true,
+    "data": {
+      "is_valid": true
+    }
+  },
+  "GET /api/personal_center/my_weike/WID1/my_lectures": {
+    "code": 0,
+    "data": {
+      "lectures": [
+        {
+          "type": "channel",
+          "id": "123",
+          "name": "Lizhiweike Mock Course",
+          "liveroom_id": "LR1"
+        }
+      ]
+    }
+  },
+  "GET /api/channel/123/info": {
+    "code": 0,
+    "data": {
+      "share_info": {
+        "share_title": "Lizhiweike Mock Course"
+      },
+      "lectures": [
+        {
+          "id": "456",
+          "name": "Lizhiweike Mock Lesson.mp4",
+          "lecture_mode": "video",
+          "liveroom_id": "LR1"
+        }
+      ]
+    }
+  },
+  "GET /api/lecture/456/info": {
+    "code": 0,
+    "data": {
+      "video_info": {
+        "video_url": "https://media.example.com/lizhiweike/lesson.mp4"
+      }
+    }
   }
 }

@@ -1,7 +1,31 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "__default": {
+    "code": 0,
+    "data": {},
+    "courseList": [],
+    "courseChapterList": [],
+    "files": []
+  },
+  "GET /content/v1.2/series/all_lesson_list": {
+    "status": "0",
+    "code": "0",
+    "data": {
+      "seriesName": "Mddclass Mock Series",
+      "groupId": "GROUP1",
+      "items": [
+        {
+          "id": "VID1",
+          "contentTitle": "Mddclass Mock Lesson",
+          "showIndex": 0,
+          "contentType": "video",
+          "videoInfo": {
+            "videoId": "VID1",
+            "videoName": "Mddclass Mock Lesson",
+            "videoUrl": "https://media.example.com/mddclass/lesson.mp4",
+            "totalSize": 1234
+          }
+        }
+      ]
+    }
   }
 }

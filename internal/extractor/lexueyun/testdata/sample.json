@@ -1,7 +1,50 @@
 {
-  "code": 0,
-  "data": {
-    "title": "test_course",
-    "list": []
+  "__default": {
+    "code": 0,
+    "data": {},
+    "courseList": [],
+    "courseChapterList": [],
+    "files": []
+  },
+  "POST /happyStudy/user/userInfo": {
+    "flag": 1,
+    "data": {
+      "id": "STU1",
+      "stuId": "STU1",
+      "merchantId": "MER1",
+      "merchantName": "乐学云商户"
+    }
+  },
+  "POST /happyStudy/proxy/lexuesv/pc/getSubjectDetail": {
+    "data": {
+      "packageId": "PKG1",
+      "merchantId": "MER1"
+    }
+  },
+  "POST /happyStudy/proxy/lexuesv/pc/getLessonsBySubject": {
+    "data": {
+      "resourceList": [
+        {
+          "resourceName": "第一章",
+          "resourceId": "RES1",
+          "lessonList": [
+            {
+              "lessonName": "Lexueyun Mock Lesson",
+              "lessonId": "L1",
+              "livePlaybackId": "ROOM1",
+              "teachUnitId": "TU1",
+              "liveSource": 2,
+              "liveStatus": 5,
+              "isNewLive": 1
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "POST /happyStudy/livePro/getPlayUrl": {
+    "data": {
+      "playUrl": "https://media.example.com/lexueyun/lesson.mp4"
+    }
   }
 }
