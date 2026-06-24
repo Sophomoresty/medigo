@@ -13,9 +13,11 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
-EXTRACTORS = os.path.expanduser("~/code/medigo/internal/extractor")
-DECOMPILED = os.path.expanduser("~/code/xwz-downloader-source-release/decompiled_full/Mooc/Courses")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+EXTRACTORS = os.environ.get("MEDIGO_EXTRACTORS_DIR", str(REPO_ROOT / "internal" / "extractor"))
+DECOMPILED = os.environ.get("MEDIGO_DECOMPILED_DIR", os.path.expanduser("~/code/xwz-downloader-source-release/decompiled_full/Mooc/Courses"))
 
 SKIP_DIRS = {"sites", "shared"}
 NON_SITE_FILES = {"extractor.go", "registry.go"}
