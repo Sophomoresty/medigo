@@ -159,7 +159,6 @@ func resolveLesson(c *util.Client, headers map[string]string, cid, lessonID stri
 	// Baijiayun playback flow (source _download_baijiayun_playback):
 	// extract hlsToken/playId from page, call shared.BaijiayunResolvePlayback.
 	hlsToken := jsVar(body, "hlsToken")
-	playID := firstNonEmpty(jsVar(body, "playId"), jsVar(body, "play_id"), jsVar(body, "sessionId"))
 	roomID := firstNonEmpty(jsVar(body, "roomId"), jsVar(body, "room_id"))
 	if hlsToken != "" && roomID != "" {
 		playbackURL, err := shared.BaijiayunResolvePlayback(c, roomID, hlsToken, playHeaders)
