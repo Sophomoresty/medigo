@@ -1,0 +1,16 @@
+# Wallstreets source alignment self-review
+
+Source root: `/home/sophomores/code/xwz-downloader-source-release/decompiled_full/Mooc/Courses/Wallstreets/`
+
+| Area | Decompiled Python source | Go implementation | Review |
+|---|---|---|---|
+| Platform constants | `Wallstreets_Course.pyc.1shot.cdc.py:39-47` and `Wallstreets_Base.pyc.1shot.cdc.py:29-33` define `index_url`, `course_list_url`, `classroom_*`, `info_url`, `source_info_url`, `token_url`, `video_play_url`, `referer`, `order_url`. | `wallstreets.go:19-30` copies the same URL constants and `referer`. | PASS |
+| Cookie/header shape | `Wallstreets_Base.pyc.1shot.cdc.py:41-43,94-112,209-230` keeps only `cookie` + `Referer`, then `Accept: application/vnd.edusoho.v2+json` for course API and validates login against homepage + course API. | `wallstreets.go:127-146` and `408-425` preserve cookie + Referer headers, and `checkCookie()` probes homepage + JSON course API. | PASS |
+| Course id/title lookup | `Wallstreets_Course.pyc.1shot.cdc.py:180-223` parses `courses_re['Wallstreets_Course']`, falls back to enrolled course lists, then loads `index_url` and strips `- 华尔街学堂 -` from `<title>`. | `parseCID()`, `fetchCourseLists()`, and `fetchTitle()` at `wallstreets.go:71-92,123-234` follow the same flow. | PASS |
+| Enrolled/classroom course discovery | `Wallstreets_Course.pyc.1shot.cdc.py:61-164` walks `/api/me/courses`, `/my/classrooms`, `/esbar/my/classroom`, and `/classroom/{id}/courses`, deduping course ids. | `fetchCourseList()` + `fetchClassroomCourseList()` at `wallstreets.go:148-221` implement the same discovery and dedupe logic. | PASS |
+| Task list parse | `Wallstreets_Course.pyc.1shot.cdc.py:227-279` GETs `info_url`, parses `&quot;title&quot;`, `taskId`, `type`, keeps `video` and `audio`, and builds `video_list`; source materials come from `source_info_url` with `/course/{cid}/material/{id}/download`. | `fetchInfos()` at `wallstreets.go:236-275` uses the same endpoints and regex families to build video and file entries. | PASS |
+| Token and qiqiuyun play URL | `Wallstreets_Course.pyc.1shot.cdc.py:284-328` GETs `activity_show`, extracts `data-token` and `data-file-global-id`, then GETs qiqiuyun play API and picks a playlist by bandwidth and mode. | `getToken()`, `getM3U8URL()`, and `parseVariants()` at `wallstreets.go:302-360` follow the same request chain and playlist selection. | PASS |
+| m3u8 text handling | `Wallstreets_Course.pyc.1shot.cdc.py:350-366` fetches the m3u8, reads `URI="..."`, fetches the key URI, and applies `qiqiuyun_key_decode`. | `getM3U8Meta()` at `wallstreets.go:371-387` preserves the extra HTTP probe and records the key metadata alongside the selected playlist URL. | PASS |
+| Download-side split | `Wallstreets_Course.pyc.1shot.cdc.py:372-405,426-468,483-538` separates video and file downloads, with course/file directories built from `COURSENAME` and `FILENAME`. | `resolveVideo()`, `fileEntry()`, and `streamEntry()` at `wallstreets.go:278-405` map the same resolved resources into downloadable media entries. | PASS |
+
+Verifier status: expected `PASS` because `Extract()` performs real HTTP (`GetString`) plus real parsing (`json.Unmarshal`, `FindStringSubmatch`, `FindAllStringSubmatch`).
