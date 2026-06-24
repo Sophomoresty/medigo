@@ -2,17 +2,24 @@ package chaoxing
 
 import (
 	"fmt"
+	"net/http"
+	"net/url"
 	"regexp"
+	"strings"
 
 	"github.com/nichuanfang/medigo/internal/extractor"
 	"github.com/nichuanfang/medigo/internal/util"
-	"github.com/tidwall/gjson"
 )
 
 var patterns = []string{
 	`chaoxing\.com`,
 	`xueyinonline\.com`,
 }
+
+var (
+	objectIDRe     = regexp.MustCompile(`(?i)(?:objectId|objectid)=([a-z0-9_-]+)`)
+	objectIDPageRe = regexp.MustCompile(`(?i)(?:objectid|objectId)\s*[:=]\s*["']([a-z0-9_-]+)["']`)
+)
 
 func init() {
 	extractor.Register(&Chaoxing{}, extractor.SiteInfo{
@@ -26,82 +33,107 @@ type Chaoxing struct{}
 
 func (c *Chaoxing) Patterns() []string { return patterns }
 
-func (c *Chaoxing) Extract(url string, opts *extractor.ExtractOpts) (*extractor.MediaInfo, error) {
+func (c *Chaoxing) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.MediaInfo, error) {
 	if opts == nil || opts.Cookies == nil {
 		return nil, fmt.Errorf("chaoxing requires login cookies (use --cookies or --cookies-from-browser)")
 	}
 
 	client := util.NewClient()
 	client.SetCookieJar(opts.Cookies)
+	ctx := newChaoxingContext(client, opts.Cookies, rawURL)
 
-	objectID := extractObjectID(url)
-	if objectID == "" {
-		body, err := client.GetString(url, map[string]string{
-			"Referer": "https://mooc1.chaoxing.com/",
-		})
+	if objectID := extractObjectID(rawURL); objectID != "" {
+		entry, err := ctx.resolveObjectResource(chaoxingResource{Title: "chaoxing_video", Kind: "video", ObjectID: objectID, Ext: "mp4"})
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch page: %w", err)
+			return nil, err
 		}
-		objectID = extractObjectIDFromPage(body)
+		return entry, nil
 	}
 
-	if objectID == "" {
-		return nil, fmt.Errorf("cannot extract video object ID from URL")
+	course, pageObjectID, err := ctx.resolveCourse(rawURL)
+	if err == nil && len(course.Entries) > 0 {
+		return course, nil
 	}
-
-	apiURL := fmt.Sprintf("https://mooc1.chaoxing.com/ananas/status/%s", objectID)
-	body, err := client.GetString(apiURL, map[string]string{
-		"Referer": "https://mooc1.chaoxing.com/",
-	})
+	if pageObjectID != "" {
+		entry, derr := ctx.resolveObjectResource(chaoxingResource{Title: "chaoxing_video", Kind: "video", ObjectID: pageObjectID, Ext: "mp4"})
+		if derr == nil {
+			return entry, nil
+		}
+	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch video status: %w", err)
+		return nil, err
 	}
-
-	title := gjson.Get(body, "filename").String()
-	if title == "" {
-		title = "chaoxing_video"
-	}
-
-	streams := make(map[string]extractor.Stream)
-	if mp4 := gjson.Get(body, "http").String(); mp4 != "" {
-		streams["mp4"] = extractor.Stream{
-			Quality: "default",
-			URLs:    []string{mp4},
-			Format:  "mp4",
-		}
-	}
-	if hls := gjson.Get(body, "hls").String(); hls != "" {
-		streams["hls"] = extractor.Stream{
-			Quality: "default",
-			URLs:    []string{hls},
-			Format:  "m3u8",
-		}
-	}
-
-	if len(streams) == 0 {
-		return nil, fmt.Errorf("no streams found (video may be restricted)")
-	}
-
-	return &extractor.MediaInfo{
-		Site:    "chaoxing",
-		Title:   title,
-		Streams: streams,
-	}, nil
+	return nil, fmt.Errorf("chaoxing: no playable course resources found")
 }
 
-var objectIDRe = regexp.MustCompile(`objectId=([a-f0-9]+)`)
-var objectIDPageRe = regexp.MustCompile(`objectid\s*[:=]\s*["']([a-f0-9]+)["']`)
-
-func extractObjectID(url string) string {
-	if m := objectIDRe.FindStringSubmatch(url); len(m) > 1 {
+func extractObjectID(raw string) string {
+	if m := objectIDRe.FindStringSubmatch(raw); len(m) > 1 {
 		return m[1]
 	}
 	return ""
 }
 
-func extractObjectIDFromPage(html string) string {
-	if m := objectIDPageRe.FindStringSubmatch(html); len(m) > 1 {
+func extractObjectIDFromPage(text string) string {
+	if m := objectIDPageRe.FindStringSubmatch(text); len(m) > 1 {
 		return m[1]
 	}
 	return ""
+}
+
+const (
+	defaultCourseHost = "https://mooc1.chaoxing.com"
+	audioListURL      = "https://appswh.chaoxing.com/vclass/page/viewlist/data?uuid=%s"
+	audioUpdateURL    = "https://appswh.chaoxing.com/vclass/page/update/data?pageId=%s&objectId=%s"
+	meetReviewURL     = "https://k.chaoxing.com/apis/chapter/getMeetReview4Job?crossOrigin=true&uuid=%s"
+	yunFileURL        = "https://k.chaoxing.com/apis/file/getYunFile?crossOrigin=true&objectId=%s&key="
+)
+
+type chaoxingContext struct {
+	c         *util.Client
+	jar       http.CookieJar
+	courseURL string
+	courseID  string
+	clazzID   string
+	enc       string
+	oldEnc    string
+	cpi       string
+	openc     string
+	downpath  string
+	title     string
+	headers   map[string]string
+}
+
+func newChaoxingContext(c *util.Client, jar http.CookieJar, rawURL string) *chaoxingContext {
+	ctx := &chaoxingContext{
+		c:         c,
+		jar:       jar,
+		courseURL: defaultCourseHost,
+		downpath:  "https://cs-ans.chaoxing.com",
+		headers: map[string]string{
+			"Accept":  "text/html,application/xhtml+xml,application/xml;q=0.9,application/json,*/*;q=0.8",
+			"Referer": defaultCourseHost + "/",
+			"Origin":  defaultCourseHost,
+		},
+	}
+	if u, err := url.Parse(rawURL); err == nil && u.Scheme != "" && u.Host != "" {
+		host := strings.ToLower(u.Host)
+		if strings.Contains(host, "chaoxing.com") && !strings.Contains(host, "mooc2-ans") {
+			ctx.courseURL = u.Scheme + "://" + u.Host
+			ctx.headers["Referer"] = ctx.courseURL + "/"
+			ctx.headers["Origin"] = ctx.courseURL
+		}
+	}
+	ctx.extractAccessFromURL(rawURL)
+	return ctx
+}
+
+func (x *chaoxingContext) abs(path string) string {
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return path
+	}
+	return strings.TrimRight(x.courseURL, "/") + "/" + strings.TrimLeft(path, "/")
+}
+
+func (x *chaoxingContext) getString(rawURL string) (string, error) {
+	return x.c.GetString(rawURL, x.headers)
 }
