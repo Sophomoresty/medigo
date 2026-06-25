@@ -599,10 +599,17 @@ func fetchKaoyanMaterials(c *util.Client, headers map[string]string, cid string)
 
 	fileURL := fmt.Sprintf("https://api.kaoyanvip.cn/learn/v1/delivery/pc/material/?my_delivery_id=%s", cid)
 	if body, err := c.GetString(fileURL, headers); err == nil {
-		var resp struct{ Data struct{ MaterialList []struct{ Name, FileURL string `json:"file_url"` } } }
+		var resp struct {
+			Data struct {
+				MaterialList []struct {
+					Name string `json:"name"`
+					Link string `json:"file_url"`
+				}
+			}
+		}
 		if json.Unmarshal([]byte(body), &resp) == nil {
 			for _, m := range resp.Data.MaterialList {
-				addFile(m.Name, m.FileURL)
+				addFile(m.Name, m.Link)
 			}
 		}
 	}
