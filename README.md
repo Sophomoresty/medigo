@@ -192,6 +192,10 @@ Pull requests welcome. Please ensure `go build ./...`, `go vet ./...`, and `go t
 - [ ] WeChat Channels (视频号)
 - [ ] Bilibili bangumi geo-bypass
 
+## Disclaimer
+
+This project is released under [The Unlicense](LICENSE) into the public domain and is intended **for educational and research purposes only**. Users must comply with applicable laws and the terms of service of respective platforms. This tool should only be used to download content that you have legitimate access to or have purchased. The developers assume no liability for any misuse of this software.
+
 ## License
 
 [The Unlicense](LICENSE) — released into the public domain.
