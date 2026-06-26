@@ -21,13 +21,14 @@ import (
 )
 
 type Opts struct {
-	Concurrency int
-	OutputDir   string
-	Overwrite   bool
-	Retries     int
-	NoProgress  bool
-	Proxy       string
-	Context     context.Context
+	Concurrency      int
+	OutputDir        string
+	Overwrite        bool
+	Retries          int
+	NoProgress       bool
+	Proxy            string
+	Context          context.Context
+	MergeOutputFormat string
 }
 
 type Engine struct {
@@ -71,6 +72,13 @@ func New(opts Opts) *Engine {
 
 func (e *Engine) HasFFmpeg() bool {
 	return e.ffmpeg != ""
+}
+
+func (e *Engine) outputExt() string {
+	if e.opts.MergeOutputFormat != "" {
+		return "." + e.opts.MergeOutputFormat
+	}
+	return ".mp4"
 }
 
 func (e *Engine) Download(info *extractor.MediaInfo, stream extractor.Stream) (string, error) {

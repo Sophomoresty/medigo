@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"strings"
 
 	"golang.org/x/net/publicsuffix"
 )
@@ -32,7 +33,8 @@ func (s *Store) LoadFromFile(path string) error {
 	}
 	for domain, cs := range grouped {
 		scheme := "https"
-		u := &url.URL{Scheme: scheme, Host: domain, Path: "/"}
+		host := strings.TrimPrefix(domain, ".")
+		u := &url.URL{Scheme: scheme, Host: host, Path: "/"}
 		s.jar.SetCookies(u, cs)
 	}
 	return nil

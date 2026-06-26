@@ -344,13 +344,14 @@ func downloadOne(ctx context.Context, info *extractor.MediaInfo) error {
 	outFilename := applyTemplate(outputTemplate, info, stream)
 
 	engine := download.New(download.Opts{
-		Concurrency: concurrency,
-		OutputDir:   outputDirFromTemplate(outFilename),
-		Overwrite:   !noOverwrites,
-		Retries:     3,
-		NoProgress:  noProgress,
-		Proxy:       proxy,
-		Context:     ctx,
+		Concurrency:      concurrency,
+		OutputDir:        outputDirFromTemplate(outFilename),
+		Overwrite:        !noOverwrites,
+		Retries:          3,
+		NoProgress:       noProgress,
+		Proxy:            proxy,
+		Context:          ctx,
+		MergeOutputFormat: mergeOutputFmt,
 	})
 
 	info.Title = baseFromTemplate(outFilename)

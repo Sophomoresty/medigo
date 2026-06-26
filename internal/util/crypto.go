@@ -25,7 +25,10 @@ func AESDecryptCBC(data, key, iv []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(data)%aes.BlockSize != 0 {
+	if len(iv) != aes.BlockSize {
+		return nil, fmt.Errorf("invalid IV length %d, expected %d", len(iv), aes.BlockSize)
+	}
+	if len(data) == 0 || len(data)%aes.BlockSize != 0 {
 		return nil, fmt.Errorf("ciphertext is not a multiple of block size")
 	}
 	mode := cipher.NewCBCDecrypter(block, iv)

@@ -31,7 +31,7 @@ func (e *Engine) downloadHLS(filename string, stream extractor.Stream) (string, 
 	}
 
 	m3u8URL := stream.URLs[0]
-	outPath := filepath.Join(e.opts.OutputDir, filename+".mp4")
+	outPath := filepath.Join(e.opts.OutputDir, filename+e.outputExt())
 
 	if !e.opts.Overwrite {
 		if _, err := os.Stat(outPath); err == nil {
@@ -550,7 +550,7 @@ func (e *Engine) downloadDASH(filename string, stream extractor.Stream) (string,
 		return "", fmt.Errorf("no video URL for DASH")
 	}
 
-	outPath := filepath.Join(e.opts.OutputDir, filename+".mp4")
+	outPath := filepath.Join(e.opts.OutputDir, filename+e.outputExt())
 	if !e.opts.Overwrite {
 		if _, err := os.Stat(outPath); err == nil {
 			return outPath, nil

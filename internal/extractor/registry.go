@@ -24,7 +24,11 @@ func Register(ext Extractor, info SiteInfo) {
 
 	var compiled []*regexp.Regexp
 	for _, p := range ext.Patterns() {
-		compiled = append(compiled, regexp.MustCompile(p))
+		re, err := regexp.Compile(p)
+		if err != nil {
+			panic(fmt.Sprintf("extractor %s: invalid pattern %q: %v", info.Name, p, err))
+		}
+		compiled = append(compiled, re)
 	}
 	extractors = append(extractors, registeredExtractor{
 		patterns: compiled,
