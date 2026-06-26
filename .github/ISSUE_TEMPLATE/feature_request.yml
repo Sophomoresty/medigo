@@ -1,0 +1,28 @@
+name: Feature Request
+description: 新功能或新站点请求
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: type
+    attributes:
+      label: 类型
+      options:
+        - 新站点支持
+        - 新功能 (flag/选项)
+        - 现有站点改进
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 描述
+      description: 你希望实现什么?
+      placeholder: "希望支持 xxx 平台 / 希望加入 --extract-audio 功能"
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: 补充信息
+      description: 相关链接、截图、或参考实现

@@ -1,0 +1,57 @@
+name: Bug Report
+description: 下载失败或行为异常
+labels: ["bug"]
+body:
+  - type: input
+    id: site
+    attributes:
+      label: 站点
+      description: 哪个平台?
+      placeholder: "bilibili / icourse163 / xiaoetech ..."
+    validations:
+      required: true
+  - type: input
+    id: url
+    attributes:
+      label: URL
+      description: 出问题的链接 (脱敏后)
+      placeholder: "https://www.example.com/course/12345"
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: 执行命令
+      description: 你跑的完整命令
+      placeholder: "medigo --cookies cookies.txt URL"
+      render: bash
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: 错误输出
+      description: 终端输出的错误信息
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: "`medigo --version` 输出"
+      placeholder: "medigo 0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统
+      placeholder: "Windows 11 / Ubuntu 22.04 / macOS 15"
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 其他有助于排查的信息 (cookie 来源、网络环境等)
