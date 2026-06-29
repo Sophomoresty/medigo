@@ -26,6 +26,11 @@ func TestExtractMock(t *testing.T) {
 		t.Fatalf("Extract returned error: %v", err)
 	}
 	goldenAssertMedia(t, "nmkjxy", got)
+	if len(got.Entries) != 2 {
+		t.Fatalf("entries = %d, want 2: %#v", len(got.Entries), got.Entries)
+	}
+	assertEntryStream(t, got.Entries, "best", "https://media.example.com/nmkjxy/lesson.mp4", "mp4")
+	assertEntryStream(t, got.Entries, "file", "https://media.example.com/nmkjxy/lecture.pdf", "pdf")
 }
 
 func goldenLoadRoutes(t *testing.T) map[string]json.RawMessage {
@@ -152,4 +157,72 @@ func goldenAssertMedia(t *testing.T, site string, got *extractor.MediaInfo) {
 			t.Fatalf("Entries[%d] has no streams or child entries: %#v", i, entry)
 		}
 	}
+}
+
+func TestParseCoursewareGroups(t *testing.T) {
+	got := parseCoursewareGroups(map[string]any{
+		"groups": []any{
+			map[string]any{
+				"title": "讲义A",
+				"files": []any{
+					map[string]any{
+						"coursewareUrl":  "/courseware/a.pdf",
+						"coursewareName": "讲义A.pdf",
+						"fileSize":       "2048",
+					},
+				},
+			},
+		},
+	}, 1)
+	if len(got) != 1 {
+		t.Fatalf("entries = %d, want 1: %#v", len(got), got)
+	}
+	assertEntryStream(t, got, "file", "https://www.nmkjxy.com/courseware/a.pdf", "pdf")
+	if got[0].Title != "(1.1.1)--讲义A" {
+		t.Fatalf("Title = %q, want %q", got[0].Title, "(1.1.1)--讲义A")
+	}
+}
+
+func TestParseLegacyCoursewareFiles(t *testing.T) {
+	got := parseLegacyCoursewareFiles(map[string]any{
+		"data": []any{
+			map[string]any{
+				"chapterSn": "2",
+				"fileUrl":   "https://cdn.example.com/legacy.docx",
+				"fileName":  "Legacy.docx",
+				"size":      json.Number("4096"),
+			},
+		},
+	}, 1)
+	if len(got) != 1 {
+		t.Fatalf("entries = %d, want 1: %#v", len(got), got)
+	}
+	assertEntryStream(t, got, "file", "https://cdn.example.com/legacy.docx", "docx")
+	if got[0].Title != "(1.2.1)--Legacy" {
+		t.Fatalf("Title = %q, want %q", got[0].Title, "(1.2.1)--Legacy")
+	}
+}
+
+func assertEntryStream(t *testing.T, entries []*extractor.MediaInfo, key, wantURL, wantFormat string) {
+	t.Helper()
+	for _, entry := range entries {
+		if entry == nil {
+			continue
+		}
+		stream, ok := entry.Streams[key]
+		if !ok || len(stream.URLs) == 0 {
+			continue
+		}
+		if stream.URLs[0] != wantURL {
+			continue
+		}
+		if stream.Format != wantFormat {
+			t.Fatalf("stream format = %q, want %q: %#v", stream.Format, wantFormat, stream)
+		}
+		if stream.Quality != "source" && key == "file" {
+			t.Fatalf("file stream quality = %q, want source", stream.Quality)
+		}
+		return
+	}
+	t.Fatalf("entry with stream %q url %q not found in %#v", key, wantURL, entries)
 }

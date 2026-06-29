@@ -2,6 +2,7 @@ package gaotu
 
 import (
 	"fmt"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
@@ -24,6 +25,17 @@ func parseIDs(raw string) ids {
 	out.Live = firstNonEmpty(out.Live, rx(liveRe, raw))
 	out.Room = firstNonEmpty(out.Room, rx(roomRe, raw))
 	return out
+}
+
+func gaotuAuthFromCookies(jar http.CookieJar, endpoints gaotuEndpoints, headers map[string]string) string {
+	sid := gaotuCookieValue(jar, gaotuCookieHosts(endpoints), "__user_token__", "sid", "Sid", "sessionId", "SessionId")
+	if sid != "" {
+		headers["Sid"] = sid
+	}
+	if uid := gaotuCookieValue(jar, gaotuCookieHosts(endpoints), "Uid", "uid", "userId", "userid"); uid != "" {
+		headers["Uid"] = uid
+	}
+	return sid
 }
 
 func rawPlaybackURL(id ids) string {
@@ -130,6 +142,7 @@ func endpointsFor(raw string) gaotuEndpoints {
 			apiHost:         "api.gaotu100.com",
 			interactiveHost: "interactive.gaotu100.com",
 			pClient:         "2",
+			userAgent:       gaotuUserAgent("tutuketang", "10.0.0.89"),
 		}
 	}
 	if strings.Contains(low, "gtgz.cn") {
@@ -138,6 +151,7 @@ func endpointsFor(raw string) gaotuEndpoints {
 			apiHost:         "api.gtgz.cn",
 			interactiveHost: "interactive.gtgz.cn",
 			pClient:         "8",
+			userAgent:       gaotuUserAgent("gtugzgh", "10.0.0.89"),
 		}
 	}
 	if strings.Contains(low, "naiyouxuexi.com") {
@@ -146,6 +160,7 @@ func endpointsFor(raw string) gaotuEndpoints {
 			apiHost:         "api.naiyouxuexi.com",
 			interactiveHost: "interactive.naiyouxuexi.com",
 			pClient:         "18",
+			userAgent:       gaotuUserAgent("gaotusuyang", "10.0.20.2"),
 		}
 	}
 	return gaotuEndpoints{
@@ -153,10 +168,15 @@ func endpointsFor(raw string) gaotuEndpoints {
 		apiHost:         "api.gaotu.cn",
 		interactiveHost: "interactive.gaotu.cn",
 		pClient:         "1",
+		userAgent:       gaotuUserAgent("gaotu", "9.0.5.49"),
 	}
 }
 
 func q(s string) string { return url.QueryEscape(s) }
+
+func gaotuUserAgent(app, version string) string {
+	return fmt.Sprintf("Mozilla/5.0 (Windows NT 10.0; x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36 (WenZaiZhiBoClient-Windows7-%s-%s)", app, version)
+}
 
 func valueString(m map[string]any, keys ...string) string {
 	for _, k := range keys {
@@ -218,4 +238,62 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func gaotuCookieValue(jar http.CookieJar, hosts []string, names ...string) string {
+	if jar == nil || len(hosts) == 0 || len(names) == 0 {
+		return ""
+	}
+	for _, host := range hosts {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			continue
+		}
+		cookies := jar.Cookies(&url.URL{Scheme: "https", Host: host, Path: "/"})
+		for _, name := range names {
+			for _, ck := range cookies {
+				if strings.EqualFold(strings.TrimSpace(ck.Name), strings.TrimSpace(name)) && strings.TrimSpace(ck.Value) != "" {
+					return strings.TrimSpace(ck.Value)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func gaotuCookieHosts(endpoints gaotuEndpoints) []string {
+	var hosts []string
+	add := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return
+		}
+		if strings.Contains(raw, "://") {
+			if u, err := url.Parse(raw); err == nil && u.Host != "" {
+				raw = u.Host
+			}
+		}
+		if raw != "" {
+			hosts = append(hosts, raw)
+			if strings.HasPrefix(raw, "www.") {
+				hosts = append(hosts, strings.TrimPrefix(raw, "www."))
+			} else {
+				hosts = append(hosts, "www."+raw)
+			}
+		}
+	}
+	add(endpoints.referer)
+	add(endpoints.apiHost)
+	add(endpoints.interactiveHost)
+	seen := map[string]bool{}
+	out := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		host = strings.TrimSpace(host)
+		if host == "" || seen[host] {
+			continue
+		}
+		seen[host] = true
+		out = append(out, host)
+	}
+	return out
 }

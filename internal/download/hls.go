@@ -29,6 +29,33 @@ func (e *Engine) downloadHLS(filename string, stream extractor.Stream) (string, 
 	if len(stream.URLs) == 0 {
 		return "", fmt.Errorf("no m3u8 URL")
 	}
+	if streamURLsAreMirrors(stream) {
+		var last error
+		perURLHeaders := streamURLHeaders(stream)
+		for _, raw := range stream.URLs {
+			if strings.TrimSpace(raw) == "" {
+				continue
+			}
+			single := stream
+			single.URLs = []string{raw}
+			single.Extra = nil
+			if uh := perURLHeaders[raw]; len(uh) > 0 {
+				single.Headers = uh
+			}
+			outPath, err := e.downloadHLS(filename, single)
+			if err == nil {
+				return outPath, nil
+			}
+			last = err
+			if ctxErr := e.ctx.Err(); ctxErr != nil {
+				return "", ctxErr
+			}
+		}
+		if last != nil {
+			return "", last
+		}
+		return "", fmt.Errorf("no m3u8 URL")
+	}
 
 	m3u8URL := stream.URLs[0]
 	outPath := filepath.Join(e.opts.OutputDir, filename+e.outputExt())
@@ -591,6 +618,44 @@ func (e *Engine) downloadDASH(filename string, stream extractor.Stream) (string,
 	}
 
 	return outPath, e.muxDASH(videoPath, audioPath, outPath, hasAudio)
+}
+
+func streamURLHeaders(stream extractor.Stream) map[string]map[string]string {
+	if stream.Extra == nil {
+		return nil
+	}
+	raw, ok := stream.Extra["url_headers"]
+	if !ok {
+		return nil
+	}
+	out := map[string]map[string]string{}
+	switch v := raw.(type) {
+	case map[string]map[string]string:
+		for u, h := range v {
+			out[u] = h
+		}
+	case map[string]any:
+		for u, hv := range v {
+			switch m := hv.(type) {
+			case map[string]string:
+				out[u] = m
+			case map[string]any:
+				h := map[string]string{}
+				for k, val := range m {
+					if s, ok := val.(string); ok {
+						h[k] = s
+					}
+				}
+				if len(h) > 0 {
+					out[u] = h
+				}
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (e *Engine) muxDASH(videoPath, audioPath, outPath string, hasAudio bool) error {

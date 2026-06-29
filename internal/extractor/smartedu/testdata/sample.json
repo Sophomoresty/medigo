@@ -19,6 +19,18 @@
           ]
         },
         {
+          "id": "res-private-file",
+          "title": "Smartedu Private File",
+          "ti_items": [
+            {
+              "ti_file_flag": "source",
+              "ti_format": "pdf",
+              "ti_storage": "cs_path:${ref-path}/edu_product/esp/assets/private.pdf?token=abc",
+              "ti_size": 4096
+            }
+          ]
+        },
+        {
           "title": "Smartedu Dummy"
         }
       ]

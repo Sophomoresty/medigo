@@ -1,6 +1,10 @@
 package gaotu
 
-import "testing"
+import (
+	"encoding/base64"
+	"strings"
+	"testing"
+)
 
 func TestEndpointsForBrandDomains(t *testing.T) {
 	tests := []struct {
@@ -13,7 +17,10 @@ func TestEndpointsForBrandDomains(t *testing.T) {
 		sourceURL string
 		fileURL   string
 		priceURL  string
+		orderURL  string
 		referer   string
+		pClient   string
+		userAgent string
 	}{
 		{
 			name:      "gaotu",
@@ -25,7 +32,10 @@ func TestEndpointsForBrandDomains(t *testing.T) {
 			sourceURL: "https://interactive.gaotu.cn/live/api/pan/listDir",
 			fileURL:   "https://interactive.gaotu.cn/live/api/pan/file",
 			priceURL:  "https://api.gaotu.cn/cs/api/product/course/detailButton?productSpuNumber=%s",
+			orderURL:  "https://api.gaotu.cn/web/order/pay/shape/list",
 			referer:   "https://www.gaotu.cn",
+			pClient:   "1",
+			userAgent: "WenZaiZhiBoClient-Windows7-gaotu-9.0.5.49",
 		},
 		{
 			name:      "tutu",
@@ -37,7 +47,10 @@ func TestEndpointsForBrandDomains(t *testing.T) {
 			sourceURL: "https://interactive.gaotu100.com/live/api/pan/listDir",
 			fileURL:   "https://interactive.gaotu100.com/live/api/pan/file",
 			priceURL:  "https://api.gaotu100.com/cs/api/product/course/detailButton?productSpuNumber=%s",
+			orderURL:  "https://api.gaotu100.com/web/order/pay/shape/list",
 			referer:   "https://gaotu100.com",
+			pClient:   "2",
+			userAgent: "WenZaiZhiBoClient-Windows7-tutuketang-10.0.0.89",
 		},
 		{
 			name:      "gaozhong",
@@ -49,7 +62,10 @@ func TestEndpointsForBrandDomains(t *testing.T) {
 			sourceURL: "https://interactive.gtgz.cn/live/api/pan/listDir",
 			fileURL:   "https://interactive.gtgz.cn/live/api/pan/file",
 			priceURL:  "https://api.gtgz.cn/cs/api/product/course/detailButton?productSpuNumber=%s",
+			orderURL:  "https://api.gtgz.cn/web/order/pay/shape/list",
 			referer:   "https://www.gtgz.cn",
+			pClient:   "8",
+			userAgent: "WenZaiZhiBoClient-Windows7-gtugzgh-10.0.0.89",
 		},
 		{
 			name:      "suyang",
@@ -61,7 +77,10 @@ func TestEndpointsForBrandDomains(t *testing.T) {
 			sourceURL: "https://interactive.naiyouxuexi.com/live/api/pan/listDir",
 			fileURL:   "https://interactive.naiyouxuexi.com/live/api/pan/file",
 			priceURL:  "https://api.naiyouxuexi.com/cs/api/product/course/detailButton?productSpuNumber=%s",
+			orderURL:  "https://api.naiyouxuexi.com/web/order/pay/shape/list",
 			referer:   "https://www.naiyouxuexi.com",
+			pClient:   "18",
+			userAgent: "WenZaiZhiBoClient-Windows7-gaotusuyang-10.0.20.2",
 		},
 	}
 	for _, tt := range tests {
@@ -69,6 +88,9 @@ func TestEndpointsForBrandDomains(t *testing.T) {
 			got := endpointsFor(tt.rawURL)
 			if got.referer != tt.referer {
 				t.Fatalf("referer = %q, want %q", got.referer, tt.referer)
+			}
+			if got.pClient != tt.pClient {
+				t.Fatalf("pClient = %q, want %q", got.pClient, tt.pClient)
 			}
 			if got.courseURL() != tt.courseURL {
 				t.Fatalf("courseURL = %q, want %q", got.courseURL(), tt.courseURL)
@@ -91,6 +113,12 @@ func TestEndpointsForBrandDomains(t *testing.T) {
 			if got.priceURL() != tt.priceURL {
 				t.Fatalf("priceURL = %q, want %q", got.priceURL(), tt.priceURL)
 			}
+			if got.orderURL() != tt.orderURL {
+				t.Fatalf("orderURL = %q, want %q", got.orderURL(), tt.orderURL)
+			}
+			if !strings.Contains(got.userAgent, tt.userAgent) {
+				t.Fatalf("userAgent = %q, want to contain %q", got.userAgent, tt.userAgent)
+			}
 		})
 	}
 }
@@ -109,6 +137,85 @@ func TestGaotuPriceFromPayload(t *testing.T) {
 	if price != 123.45 {
 		t.Fatalf("price = %v, want 123.45", price)
 	}
+}
+
+func TestGaotuOrderPriceFromPayload(t *testing.T) {
+	price, ok := gaotuOrderPriceFromPayload(map[string]any{
+		"data": map[string]any{
+			"payOrderList": []any{
+				map[string]any{
+					"orderBaseVO": map[string]any{
+						"course": map[string]any{"courseId": "C001"},
+					},
+					"paymentInfo": map[string]any{"originalPrice": "45600"},
+				},
+			},
+		},
+	}, "C001")
+	if !ok {
+		t.Fatal("order price not found")
+	}
+	if price != 456 {
+		t.Fatalf("price = %v, want 456", price)
+	}
+}
+
+func TestGaotuLessonRequestPayloads(t *testing.T) {
+	id := ids{Live: "L001", SID: "session-token"}
+	video := gaotuVideoRequestPayload(id)
+	if video["liveId"] != "L001" || video["sid"] != "session-token" || video["roleType"] != 0 {
+		t.Fatalf("video payload mismatch: %#v", video)
+	}
+	live := gaotuLiveRequestPayload(id)
+	if live["liveId"] != "L001" || live["sessionId"] != "session-token" || live["roleType"] != 0 {
+		t.Fatalf("live payload mismatch: %#v", live)
+	}
+}
+
+func TestGaotuMediaURLFromPayloadPrefersLargestCDNAndDecodesEncURL(t *testing.T) {
+	encoded := encodeTestBjcloudvod("https://cdn.example.com/decoded.mp4")
+	got := gaotuMediaURLFromPayload(map[string]any{
+		"data": map[string]any{
+			"play_info": map[string]any{
+				"low": map[string]any{
+					"size": float64(10),
+					"cdn_list": []any{
+						map[string]any{"url": "https://cdn.example.com/low.mp4"},
+					},
+				},
+				"high": map[string]any{
+					"size": float64(20),
+					"cdn_list": []any{
+						map[string]any{"enc_url": encoded},
+					},
+				},
+			},
+		},
+	})
+	if got != "https://cdn.example.com/decoded.mp4" {
+		t.Fatalf("media url = %q, want decoded high url", got)
+	}
+}
+
+func TestGaotuMediaURLFromNestedStringPayload(t *testing.T) {
+	got := gaotuMediaURLFromPayload(map[string]any{
+		"data": map[string]any{
+			"signinLivePlayback": `{"play_info":{"source":{"size":1,"cdn_list":[{"url":"https://cdn.example.com/live.m3u8"}]}}}`,
+		},
+	})
+	if got != "https://cdn.example.com/live.m3u8" {
+		t.Fatalf("media url = %q, want nested m3u8", got)
+	}
+}
+
+func encodeTestBjcloudvod(raw string) string {
+	shift := byte(3)
+	encoded := make([]byte, len(raw)+1)
+	encoded[0] = shift
+	for i, b := range []byte(raw) {
+		encoded[i+1] = b ^ byte((int(shift)+i)%8)
+	}
+	return "bjcloudvod://" + strings.NewReplacer("+", "-", "/", "_", "=", "").Replace(base64.StdEncoding.EncodeToString(encoded))
 }
 
 func TestCollectGaotuPanNodes(t *testing.T) {

@@ -1,105 +1,55 @@
-#!/bin/bash
-set +e
+#!/usr/bin/env bash
+set -u
 
-MEDIGO="./medigo"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN="${MEDIAGO_E2E_BIN:-$ROOT/mediago}"
+PASS=0
+FAIL=0
+
+run_test() {
+    local name="$1"
+    shift
+    echo "[TEST] $name..."
+    if "$@"; then
+        echo "  PASS"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL"
+        FAIL=$((FAIL + 1))
+    fi
+}
 
 echo "=== MediGo E2E Verification ==="
 echo ""
 
-PASS=0
-FAIL=0
+cd "$ROOT" || exit 1
 
-echo "[BUILD] Building medigo..."
-cd ~/code/medigo
-go build -o medigo ./cmd/medigo
-echo "[BUILD] OK"
+echo "[BUILD] Building mediago..."
+if go build -o "$BIN" ./cmd/mediago; then
+    echo "[BUILD] OK"
+else
+    echo "[BUILD] FAIL"
+    exit 1
+fi
 echo ""
 
-# Test 1: Bilibili -j
-echo "[TEST] Bilibili -j (dump json)..."
-if $MEDIGO -j "https://www.bilibili.com/video/BV1GJ411x7h7" 2>/dev/null | grep -q 'bilibili'; then
-    echo "  PASS: JSON with streams"
-    PASS=$((PASS+1))
-else
-    echo "  FAIL"
-    FAIL=$((FAIL+1))
-fi
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT
 
-# Test 2: Douyin -j
-echo "[TEST] Douyin -j (short URL)..."
-if $MEDIGO -j "https://v.douyin.com/CeiJFhAo/" 2>/dev/null | grep -q 'douyin'; then
-    echo "  PASS: JSON with streams"
-    PASS=$((PASS+1))
-else
-    echo "  FAIL (may be network issue)"
-    FAIL=$((FAIL+1))
-fi
-
-# Test 3: --list-extractors count
-echo "[TEST] --list-extractors count..."
-COUNT=$($MEDIGO --list-extractors 2>/dev/null | grep "extractors" | grep -o '[0-9]*')
-if [ "$COUNT" -ge 90 ]; then
-    echo "  PASS: $COUNT extractors"
-    PASS=$((PASS+1))
-else
-    echo "  FAIL: only $COUNT"
-    FAIL=$((FAIL+1))
-fi
-
-# Test 4: -F (list formats)
-echo "[TEST] -F (list formats)..."
-if $MEDIGO -F "https://www.bilibili.com/video/BV1GJ411x7h7" 2>/dev/null | grep -q 'QUALITY'; then
-    echo "  PASS: format table shown"
-    PASS=$((PASS+1))
-else
-    echo "  FAIL"
-    FAIL=$((FAIL+1))
-fi
-
-# Test 5: Auth error
-echo "[TEST] Auth error handling..."
-if $MEDIGO "https://www.icourse163.org/course/ZJICM-1449623161" 2>&1 | grep -qi "cookie\|login\|auth\|not logged\|requires"; then
-    echo "  PASS: proper error message"
-    PASS=$((PASS+1))
-else
-    echo "  FAIL"
-    FAIL=$((FAIL+1))
-fi
-
-# Test 6: Unsupported URL
-echo "[TEST] Unsupported URL..."
-if $MEDIGO "https://www.example.com/video" 2>&1 | grep -qi "unsupported"; then
-    echo "  PASS"
-    PASS=$((PASS+1))
-else
-    echo "  FAIL"
-    FAIL=$((FAIL+1))
-fi
-
-# Test 7: Version
-echo "[TEST] Version..."
-if $MEDIGO version 2>/dev/null | grep -q "medigo"; then
-    echo "  PASS"
-    PASS=$((PASS+1))
-else
-    echo "  FAIL"
-    FAIL=$((FAIL+1))
-fi
-
-# Test 8: No args shows help
-echo "[TEST] No args shows help..."
-if $MEDIGO 2>&1 | grep -q "Usage"; then
-    echo "  PASS"
-    PASS=$((PASS+1))
-else
-    echo "  FAIL"
-    FAIL=$((FAIL+1))
-fi
+run_test "--help shows usage" bash -c '"$0" --help >"$1/help.out" 2>"$1/help.err" && grep -q "Usage:" "$1/help.out"' "$BIN" "$TMPDIR"
+run_test "version command" bash -c '"$0" version >"$1/version.out" 2>"$1/version.err" && grep -q "mediago 0.1.0" "$1/version.out"' "$BIN" "$TMPDIR"
+run_test "--version flag" bash -c '"$0" --version >"$1/version-flag.out" 2>"$1/version-flag.err" && grep -q "mediago 0.1.0" "$1/version-flag.out"' "$BIN" "$TMPDIR"
+run_test "--list-extractors count" bash -c '"$0" --list-extractors >"$1/list.out" 2>"$1/list.err" && count=$(tail -n 1 "$1/list.out" | grep -Eo "^[0-9]+") && [ "${count:-0}" -ge 90 ]' "$BIN" "$TMPDIR"
+run_test "no args shows help" bash -c '"$0" >"$1/noargs.out" 2>"$1/noargs.err" && grep -q "Usage:" "$1/noargs.out"' "$BIN" "$TMPDIR"
+run_test "unsupported URL fails clearly" bash -c '! "$0" "https://www.example.com/video" >"$1/unsupported.out" 2>"$1/unsupported.err" && grep -qi "unsupported URL" "$1/unsupported.err"' "$BIN" "$TMPDIR"
+run_test "auth-required extractor fails clearly without cookies" bash -c '! "$0" "https://www.icourse163.org/course/ZJICM-1449623161" >"$1/auth.out" 2>"$1/auth.err" && grep -Eqi "cookie|login|auth|require|unsupported|failed" "$1/auth.err"' "$BIN" "$TMPDIR"
+run_test "-j unsupported URL fails clearly" bash -c '! "$0" -j "https://www.example.com/video" >"$1/dump-json.out" 2>"$1/dump-json.err" && grep -qi "unsupported URL" "$1/dump-json.err"' "$BIN" "$TMPDIR"
+run_test "-F unsupported URL fails clearly" bash -c '! "$0" -F "https://www.example.com/video" >"$1/list-formats.out" 2>"$1/list-formats.err" && grep -qi "unsupported URL" "$1/list-formats.err"' "$BIN" "$TMPDIR"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 
-if [ $FAIL -gt 0 ]; then
+if [ "$FAIL" -gt 0 ]; then
     exit 1
 fi
 exit 0

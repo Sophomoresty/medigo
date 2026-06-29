@@ -138,6 +138,7 @@ func (x *chaoxingContext) resolveObjectResource(res chaoxingResource) (*extracto
 }
 
 func (x *chaoxingContext) resolveLiveResource(res chaoxingResource) *extractor.MediaInfo {
+	liveURL := ""
 	values := url.Values{}
 	values.Set("jobid", res.JobID)
 	values.Set("courseid", "")
@@ -145,17 +146,27 @@ func (x *chaoxingContext) resolveLiveResource(res chaoxingResource) *extractor.M
 	values.Set("clazzid", "")
 	values.Set("userid", "")
 	values.Set("liveid", res.LiveID)
-	body, err := x.getString(x.abs("/ananas/live/liveinfo") + "?" + values.Encode())
-	if err == nil {
-		var payload any
-		if json.Unmarshal([]byte(body), &payload) == nil {
-			if u := firstURLMatching(payload, isPlayableURL); u != "" {
-				return streamEntry(res.Title, u, mediaFormat(u, "mp4"), x.headers, map[string]any{"kind": "live", "live_id": res.LiveID, "job_id": res.JobID})
+	if res.LiveID != "" {
+		body, err := x.getString(x.abs("/ananas/live/liveinfo") + "?" + values.Encode())
+		if err == nil {
+			var payload any
+			if json.Unmarshal([]byte(body), &payload) == nil {
+				liveURL = firstURLMatching(payload, isPlayableURL)
 			}
 		}
 	}
-	if u := x.fetchMeetReviewURL(firstNonEmpty(res.UUID, res.JobID)); u != "" {
-		return streamEntry(res.Title, u, mediaFormat(u, "mp4"), x.headers, map[string]any{"kind": "live", "live_id": res.LiveID, "job_id": res.JobID})
+	if liveURL != "" {
+		for _, reviewID := range []string{res.UUID, res.JobID} {
+			if u := x.fetchMeetReviewURL(reviewID); u != "" {
+				return streamEntry(res.Title, u, mediaFormat(u, "mp4"), x.headers, map[string]any{"kind": "live", "live_id": res.LiveID, "job_id": res.JobID, "uuid": res.UUID})
+			}
+		}
+		return streamEntry(res.Title, liveURL, mediaFormat(liveURL, "mp4"), x.headers, map[string]any{"kind": "live", "live_id": res.LiveID, "job_id": res.JobID, "uuid": res.UUID})
+	}
+	for _, reviewID := range []string{res.UUID, res.JobID} {
+		if u := x.fetchMeetReviewURL(reviewID); u != "" {
+			return streamEntry(res.Title, u, mediaFormat(u, "mp4"), x.headers, map[string]any{"kind": "live", "live_id": res.LiveID, "job_id": res.JobID, "uuid": res.UUID})
+		}
 	}
 	return nil
 }
@@ -164,7 +175,7 @@ func (x *chaoxingContext) fetchMeetReviewURL(uuid string) string {
 	if uuid == "" {
 		return ""
 	}
-	body, err := x.getString(fmt.Sprintf(meetReviewURL, url.QueryEscape(uuid)))
+	body, err := x.getString(fmt.Sprintf(firstNonEmpty(x.meetReviewURL, defaultMeetReviewURL), url.QueryEscape(uuid)))
 	if err != nil {
 		return ""
 	}
@@ -176,12 +187,17 @@ func (x *chaoxingContext) fetchMeetReviewURL(uuid string) string {
 	if objectID == "" {
 		return ""
 	}
-	body, err = x.getString(fmt.Sprintf(yunFileURL, url.QueryEscape(objectID)))
+	body, err = x.getString(fmt.Sprintf(firstNonEmpty(x.yunFileURL, defaultYunFileURL), url.QueryEscape(objectID)))
 	if err != nil {
 		return ""
 	}
 	if json.Unmarshal([]byte(body), &payload) != nil {
 		return ""
+	}
+	for _, key := range []string{"download", "http"} {
+		if u := normalizeURL(firstFieldString(payload, key)); isHTTPURL(u) {
+			return u
+		}
 	}
 	return firstURLMatching(payload, isHTTPURL)
 }

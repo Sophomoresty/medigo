@@ -2,6 +2,7 @@
 package yikaobang
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -284,7 +285,12 @@ func (s *ykbSession) fetchPayload(req ykbAPIRequest) (ykbPayload, error) {
 }
 
 func decodeYikaobangBody(body string) (any, error) {
-	dec := json.NewDecoder(strings.NewReader(body))
+	var raw json.RawMessage
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		return body, err
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var root any
 	if err := dec.Decode(&root); err != nil {

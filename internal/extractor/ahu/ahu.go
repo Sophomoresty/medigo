@@ -50,74 +50,31 @@ func (a *Ahu) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.Me
 	if opts == nil || opts.Cookies == nil {
 		return nil, fmt.Errorf("ahu requires login cookies")
 	}
-
-	c := util.NewClient()
-	c.SetCookieJar(opts.Cookies)
-	headers := map[string]string{
-		"Referer": course_list_url,
-		"referer": course_list_url,
-	}
-	if err := validateAhuLogin(c, opts.Cookies, headers); err != nil {
+	dlOpts := AhuDownloadOptions{Cookies: opts.Cookies, Quality: opts.Quality, ListOnly: opts.ListOnly}
+	ctx, err := newAhuCourse(dlOpts)
+	if err != nil {
 		return nil, err
 	}
-	cid := extractFirst(cidRe, rawURL)
-	if cid == "" {
-		courses := fetchCourseList(c, headers)
-		if len(courses) > 0 {
-			cid = courses[0].ID
-			rawURL = firstNonEmpty(courses[0].LearnURL, rawURL)
-		}
+	if err := ctx.prepare(rawURL, true); err != nil {
+		return nil, err
 	}
-	if cid == "" {
-		return nil, fmt.Errorf("cannot parse courseId from URL: %s", rawURL)
-	}
-
 	if lessonID := extractFirst(lessonIDRe, rawURL); lessonID != "" {
-		stream, err := resolveLesson(c, headers, cid, lessonID)
+		play, err := ctx.getPlayInfo(lessonID)
 		if err != nil {
 			return nil, err
 		}
-		return &extractor.MediaInfo{
-			Site:  "ahu",
-			Title: "ahu_" + cid + "_" + lessonID,
-			Streams: map[string]extractor.Stream{
-				"best": stream,
-			},
-		}, nil
-	}
-
-	detailURL := fmt.Sprintf(course_info_url, cid)
-	body, err := c.GetString(detailURL, headers)
-	if err != nil {
-		return nil, fmt.Errorf("fetch ahu course info: %w", err)
-	}
-
-	title := firstNonEmpty(extractTitle(body), "ahu_"+cid)
-	lessons := parseLessons(body)
-	resources := parseCourseFiles(body, detailURL)
-
-	entries := make([]*extractor.MediaInfo, 0, len(lessons)+len(resources))
-	for i, lesson := range lessons {
-		stream, err := resolveLesson(c, headers, cid, lesson.ID)
+		stream, extra, err := ctx.streamFromPlay(play)
 		if err != nil {
-			continue
+			return nil, err
 		}
-		entryTitle := firstNonEmpty(lesson.Title, fmt.Sprintf("%02d %s", i+1, lesson.ID))
-		entries = append(entries, &extractor.MediaInfo{
-			Site:  "ahu",
-			Title: util.SanitizeFilename(entryTitle),
-			Streams: map[string]extractor.Stream{
-				"best": stream,
-			},
-			Extra: map[string]any{"course_id": cid, "lesson_id": lesson.ID},
-		})
+		if extra == nil {
+			extra = map[string]any{}
+		}
+		extra["course_id"] = ctx.cid
+		extra["lesson_id"] = lessonID
+		return &extractor.MediaInfo{Site: "ahu", Title: util.SanitizeFilename("ahu_" + ctx.cid + "_" + lessonID), Streams: map[string]extractor.Stream{"best": stream}, Extra: extra}, nil
 	}
-	entries = append(entries, resourceEntries(resources, headers)...)
-	if len(entries) == 0 {
-		return nil, fmt.Errorf("ahu: no playable video URLs or course files found")
-	}
-
-	return &extractor.MediaInfo{Site: "ahu", Title: util.SanitizeFilename(title), Entries: dedupeEntries(entries)}, nil
+	return ctx.mediaInfo()
 }
 
 func validateAhuLogin(c *util.Client, jar http.CookieJar, headers map[string]string) error {
@@ -327,7 +284,7 @@ func resolveLesson(c *util.Client, headers map[string]string, cid, lessonID stri
 		return extractor.Stream{}, fmt.Errorf("fetch ahu play page: %w", err)
 	}
 
-	if direct := normalizeResourceURL(extractFirst(directURLRe, body)); direct != "" {
+	if direct := normalizeResourceURLWithBase(extractFirst(directURLRe, body), playURL); direct != "" {
 		return mediaStream(direct, playHeaders), nil
 	}
 
@@ -593,6 +550,20 @@ func normalizeResourceURLWithBase(s, baseURL string) string {
 		return s
 	}
 	return base.ResolveReference(ref).String()
+}
+
+func quoteResourceURL(s string) string {
+	s = normalizeResourceURL(s)
+	if s == "" {
+		return ""
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme == "" {
+		return s
+	}
+	u.RawPath = ""
+	u.ForceQuery = false
+	return u.String()
 }
 
 func pickFormat(u string) string {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -20,6 +21,7 @@ const (
 	sourceURLFormat = "https://%s/live/api/pan/listDir"
 	fileURLFormat   = "https://%s/live/api/pan/file"
 	priceURLFormat  = "https://%s/cs/api/product/course/detailButton?productSpuNumber=%%s"
+	orderURLFormat  = "https://%s/web/order/pay/shape/list"
 	video_play_url  = "https://api.wenzaizhibo.com/web/video/getPlayUrl?vid=%s&partner_id=%s&user_number=%s&expires_in=%s&user_role=%s&timestamp=%s&is_encrypted=%s&sign=%s"
 	live_play_url   = "https://api.wenzaizhibo.com/web/playback/getPlaybackInfoV4?room_id=%s&partner_id=%s&user_number=%s&expires_in=%s&user_role=%s&timestamp=%s&is_encrypted=%s&sign=%s&playlist=%s"
 )
@@ -39,6 +41,7 @@ type gaotuEndpoints struct {
 	apiHost         string
 	interactiveHost string
 	pClient         string
+	userAgent       string
 }
 
 func (e gaotuEndpoints) courseURL() string { return fmt.Sprintf(courseURLFormat, e.apiHost, e.pClient) }
@@ -48,6 +51,7 @@ func (e gaotuEndpoints) liveURL() string   { return fmt.Sprintf(liveURLFormat, e
 func (e gaotuEndpoints) sourceURL() string { return fmt.Sprintf(sourceURLFormat, e.interactiveHost) }
 func (e gaotuEndpoints) fileURL() string   { return fmt.Sprintf(fileURLFormat, e.interactiveHost) }
 func (e gaotuEndpoints) priceURL() string  { return fmt.Sprintf(priceURLFormat, e.apiHost) }
+func (e gaotuEndpoints) orderURL() string  { return fmt.Sprintf(orderURLFormat, e.apiHost) }
 
 var (
 	clazzRe = regexp.MustCompile(`(?i)(?:clazzNumber|clazzId|courseId|productSpuNumber|cid)=([A-Za-z0-9_-]+)`)
@@ -61,6 +65,7 @@ type ids struct {
 	Room  string
 	SID   string
 	Role  string
+	Kind  string
 }
 
 type lessonNode struct {
@@ -86,6 +91,10 @@ func (g *Gaotu) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.
 		"Referer":      endpoints.referer,
 		"Origin":       strings.TrimRight(endpoints.referer, "/"),
 		"Content-Type": "application/json;charset=UTF-8",
+		"User-Agent":   endpoints.userAgent,
+	}
+	if sid := gaotuAuthFromCookies(opts.Cookies, endpoints, headers); sid != "" && id.SID == "" {
+		id.SID = sid
 	}
 
 	if id.Live != "" || id.Room != "" {
@@ -119,6 +128,14 @@ func resolveCourse(c *util.Client, headers map[string]string, endpoints gaotuEnd
 	if price, ok := fetchGaotuPrice(c, headers, endpoints, id.Clazz); ok {
 		extra["price"] = price
 	}
+	if orderPrice, ok := fetchGaotuOrderPrice(c, headers, endpoints, id.Clazz); ok {
+		extra["purchased"] = true
+		if orderPrice > 0 {
+			extra["price"] = orderPrice
+		}
+	} else {
+		extra["purchased"] = true
+	}
 	entries := make([]*extractor.MediaInfo, 0)
 	if media := findMediaURL(payload); media != "" {
 		entries = append(entries, mediaInfo(title, media, headers))
@@ -143,6 +160,7 @@ func resolveCourse(c *util.Client, headers map[string]string, endpoints gaotuEnd
 		seen[node.ID] = true
 		lessonID := id
 		lessonID.Live = node.ID
+		lessonID.Kind = node.Kind
 		entry, err := resolveLesson(c, headers, endpoints, lessonID, node.Title)
 		if err == nil {
 			entries = append(entries, entry)
@@ -155,16 +173,24 @@ func resolveCourse(c *util.Client, headers map[string]string, endpoints gaotuEnd
 }
 
 func resolveLesson(c *util.Client, headers map[string]string, endpoints gaotuEndpoints, id ids, fallbackTitle string) (*extractor.MediaInfo, error) {
-	if id.Role == "" {
-		id.Role = "3"
-	}
 	payloads := make([]any, 0, 2)
 	if id.Live != "" {
-		if p, err := postJSON(c, endpoints.videoURL(), map[string]any{"liveId": id.Live, "sid": id.SID, "roleType": id.Role}, headers); err == nil {
-			payloads = append(payloads, p)
-		}
-		if p, err := postJSON(c, endpoints.liveURL(), map[string]any{"liveId": id.Live, "roleType": id.Role}, headers); err == nil {
-			payloads = append(payloads, p)
+		switch strings.TrimSpace(strings.ToLower(id.Kind)) {
+		case "1":
+			if p, err := postJSON(c, endpoints.videoURL(), gaotuVideoRequestPayload(id), headers); err == nil {
+				payloads = append(payloads, p)
+			}
+		case "0", "2":
+			if p, err := postJSON(c, endpoints.liveURL(), gaotuLiveRequestPayload(id), headers); err == nil {
+				payloads = append(payloads, p)
+			}
+		default:
+			if p, err := postJSON(c, endpoints.videoURL(), gaotuVideoRequestPayload(id), headers); err == nil {
+				payloads = append(payloads, p)
+			}
+			if p, err := postJSON(c, endpoints.liveURL(), gaotuLiveRequestPayload(id), headers); err == nil {
+				payloads = append(payloads, p)
+			}
 		}
 	}
 	if id.Room != "" {
@@ -179,8 +205,16 @@ func resolveLesson(c *util.Client, headers map[string]string, endpoints gaotuEnd
 	return nil, fmt.Errorf("gaotu: no cdn_list url for live %s", firstNonEmpty(id.Live, id.Room))
 }
 
+func gaotuVideoRequestPayload(id ids) map[string]any {
+	return map[string]any{"liveId": id.Live, "sid": id.SID, "roleType": 0}
+}
+
+func gaotuLiveRequestPayload(id ids) map[string]any {
+	return map[string]any{"liveId": id.Live, "sessionId": id.SID, "roleType": 0}
+}
+
 func mediaFromPayload(c *util.Client, headers map[string]string, payload any) string {
-	if media := findMediaURL(payload); media != "" {
+	if media := gaotuMediaURLFromPayload(payload); media != "" {
 		return media
 	}
 	for _, pc := range collectStrings(payload, "pcUrl") {
@@ -195,12 +229,29 @@ func mediaFromPayload(c *util.Client, headers map[string]string, payload any) st
 }
 
 func decodePcURL(c *util.Client, headers map[string]string, pc string) string {
+	if media := decodeWenzaiPCURL(c, headers, pc); media != "" {
+		return media
+	}
 	values := queryValues(pc)
 	if values.Get("vid") != "" {
 		api := fmt.Sprintf(video_play_url, q(values.Get("vid")), q(values.Get("partner_id")), q(values.Get("user_number")), q(values.Get("expires_in")), q(values.Get("user_role")), q(values.Get("timestamp")), q(values.Get("is_encrypted")), q(values.Get("sign")))
 		return getMediaJSON(c, headers, api)
 	}
 	if values.Get("room_id") != "" {
+		if strings.Contains(strings.ToLower(pc), "getplaybackinfov4") {
+			return getMediaJSON(c, headers, pc)
+		}
+		if strings.Contains(strings.ToLower(pc), "getplaybackinfo") {
+			u, err := url.Parse(pc)
+			if err == nil {
+				qv := u.Query()
+				if qv.Get("end_type") == "" {
+					qv.Set("end_type", "4")
+					u.RawQuery = qv.Encode()
+				}
+				return getMediaJSON(c, headers, u.String())
+			}
+		}
 		api := fmt.Sprintf(live_play_url, q(values.Get("room_id")), q(values.Get("partner_id")), q(values.Get("user_number")), q(values.Get("expires_in")), q(values.Get("user_role")), q(values.Get("timestamp")), q(values.Get("is_encrypted")), q(values.Get("sign")), q(values.Get("playlist")))
 		return getMediaJSON(c, headers, api)
 	}
@@ -212,11 +263,7 @@ func getMediaJSON(c *util.Client, headers map[string]string, api string) string 
 	if err != nil {
 		return ""
 	}
-	var payload any
-	if json.Unmarshal([]byte(body), &payload) != nil {
-		return ""
-	}
-	return findMediaURL(payload)
+	return gaotuMediaURLFromBody([]byte(body))
 }
 
 func postJSON(c *util.Client, api string, payload map[string]any, headers map[string]string) (any, error) {

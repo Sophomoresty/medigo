@@ -42,6 +42,7 @@ const (
 
 var patterns = []string{
 	`(?:[\w-]+\.)?plaso\.cn/`,
+	`(?:[\w-]+\.)?plaso\.com/`,
 	`(?:[\w-]+\.)?aiwenyun\.cn/`,
 }
 
@@ -107,16 +108,30 @@ type plasoSource struct {
 	Extra      map[string]any
 }
 
+type plasoStaticResource struct {
+	URL      string
+	Path     string
+	Host     string
+	Entry    bool
+	Required bool
+}
+
 var (
 	cidRe   = regexp.MustCompile(`[?&](?:sfId|sfid|shareKey|fileId|fid|id|packageId|courseId|groupId|fileGroupId|dirId)=([\w.-]+)`)
 	mediaRe = regexp.MustCompile(`https?://[^"'\s<>]+\.(?:m3u8|mp4|mp3)(?:\?[^"'\s<>]*)?`)
 )
 
 func (s *Plaso) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.MediaInfo, error) {
+	sess := newPlasoSession(rawURL, safePlasoExtractOpts(opts))
+	if staticMI := sess.resolveNativeStaticMedia(rawURL); staticMI != nil {
+		return staticMI, nil
+	}
+	if directMI := sess.resolveDirectResourceMedia(rawURL); directMI != nil {
+		return directMI, nil
+	}
 	if opts == nil || opts.Cookies == nil {
 		return nil, fmt.Errorf("plaso requires login cookies")
 	}
-	sess := newPlasoSession(rawURL, opts)
 	if err := sess.checkCookie(); err != nil {
 		return nil, err
 	}
@@ -176,6 +191,7 @@ func (s *Plaso) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("plaso: no playable video/material URLs resolved from %d file records", unresolved)
 	}
+
 	extra := map[string]any{"course_id": cid, "resolved_id": resolvedCID, "platform": sess.eps.platform}
 	if cidKind != "" {
 		extra["course_kind"] = cidKind
@@ -190,6 +206,13 @@ func (s *Plaso) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.
 		extra["unresolved_count"] = unresolved
 	}
 	return &extractor.MediaInfo{Site: "plaso", Title: clean(title), Entries: entries, Extra: extra}, nil
+}
+
+func safePlasoExtractOpts(opts *extractor.ExtractOpts) *extractor.ExtractOpts {
+	if opts != nil {
+		return opts
+	}
+	return &extractor.ExtractOpts{}
 }
 
 func newPlasoSession(rawURL string, opts *extractor.ExtractOpts) *plasoSession {

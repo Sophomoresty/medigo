@@ -242,8 +242,9 @@ func (s *plasoSession) pickPlistMedia(root any, baseURL string, f fileItem) plas
 		if formatOf(c.url, f.Type) == "m3u8" {
 			videoURLs = append(videoURLs, c.url)
 		}
-		picked = c
-		break
+		if picked.url == "" {
+			picked = c
+		}
 	}
 	if len(videoURLs) > 1 {
 		if text := s.mergeM3U8TextList(videoURLs); text != "" {
@@ -273,8 +274,12 @@ func (s *plasoSession) plistTimelineCandidates(root any, f fileItem) []plistCand
 		switch t := v.(type) {
 		case map[string]any:
 			for _, key := range []string{"recordUrl", "m3u8Url", "m3u8URL", "url", "audioPath"} {
-				if raw := firstText(t, key); strings.Contains(strings.ToLower(raw), ".m3u8") || strings.Contains(strings.ToLower(raw), ".mp4") {
-					out = append(out, plistCand{url: buildPlistMediaURL(f.Location, raw, f.LocationPath), audio: key == "audioPath" || strings.HasPrefix(plistTrackName(raw), "a")})
+				if raw := firstText(t, key); strings.Contains(strings.ToLower(raw), ".m3u8") || strings.Contains(strings.ToLower(raw), ".mp4") || strings.Contains(strings.ToLower(raw), ".mp3") || strings.Contains(strings.ToLower(raw), ".m4a") || strings.Contains(strings.ToLower(raw), ".aac") {
+					url := buildPlasoEventAudioURL(raw)
+					if key != "audioPath" {
+						url = buildPlistMediaURL(f.Location, raw, f.LocationPath)
+					}
+					out = append(out, plistCand{url: url, audio: key == "audioPath" || strings.HasPrefix(plistTrackName(raw), "a")})
 				}
 			}
 			for _, x := range t {
@@ -303,7 +308,11 @@ func parsePlistMediaArray(v []any, f fileItem) (plistCand, bool) {
 	if code == "37" {
 		for _, x := range v[2:] {
 			if mediaPath := mediaPathFromAny(x); mediaPath != "" {
-				out.url = buildPlistMediaURL(f.Location, mediaPath, f.LocationPath)
+				if isAudioMediaPath(mediaPath) {
+					out.url = buildPlasoEventAudioURL(mediaPath)
+				} else {
+					out.url = buildPlistMediaURL(f.Location, mediaPath, f.LocationPath)
+				}
 				out.startMS = start
 				out.audio = isAudioMediaPath(mediaPath)
 				return out, true
@@ -313,8 +322,12 @@ func parsePlistMediaArray(v []any, f fileItem) (plistCand, bool) {
 	}
 	if len(v) >= 4 {
 		mediaPath := valueText(v[3])
-		if strings.Contains(strings.ToLower(mediaPath), ".m3u8") || strings.Contains(strings.ToLower(mediaPath), ".mp4") || strings.Contains(strings.ToLower(mediaPath), ".mp3") {
-			out.url = buildPlistMediaURL(f.Location, mediaPath, f.LocationPath)
+		if isMediaPath(mediaPath) || isAudioMediaPath(mediaPath) {
+			if isAudioMediaPath(mediaPath) || code == "1" {
+				out.url = buildPlasoEventAudioURL(mediaPath)
+			} else {
+				out.url = buildPlistMediaURL(f.Location, mediaPath, f.LocationPath)
+			}
 			out.startMS = start
 			out.duration = valueText(v[2])
 			out.audio = isAudioMediaPath(mediaPath) || code == "1"
@@ -348,7 +361,9 @@ func mediaPathFromAny(v any) string {
 
 func isMediaPath(s string) bool {
 	l := strings.ToLower(strings.TrimSpace(s))
-	return strings.Contains(l, ".m3u8") || strings.Contains(l, ".mp4") || strings.Contains(l, ".flv") || strings.Contains(l, ".mov") || strings.Contains(l, ".m4v") || strings.Contains(l, ".ts")
+	return strings.Contains(l, ".m3u8") || strings.Contains(l, ".mp4") || strings.Contains(l, ".flv") ||
+		strings.Contains(l, ".mov") || strings.Contains(l, ".m4v") || strings.Contains(l, ".ts") ||
+		strings.Contains(l, ".mp3") || strings.Contains(l, ".m4a") || strings.Contains(l, ".aac") || strings.Contains(l, ".wav")
 }
 
 func isAudioMediaPath(s string) bool {

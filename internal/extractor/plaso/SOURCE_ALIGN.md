@@ -18,9 +18,11 @@
 | `fileId`, `originId`, `_id`, `myid`, `location`, `locationPath`, `vid`, `storageId` 等字段 | `buildFileItem`, `expandFileDetails` |
 | Aliyun `getPlayInfo`, STS + GetPlayInfo/GetLicense | `fetchAliPlaySource`, `fetchAliSTSPlaySource`, shared Aliyun helper |
 | Polyv `getPolyvVidInfoV2`, secure manifest, `polyvViewSign`, video-info fallback | `fetchPolyvSource`, shared Polyv helper |
-| plist/local media `media`, `playUrls`, `m3u8Url`, `path`, audio | `fetchPlistSource`, `pickPlistMedia` |
+| plist/local media `media`, `playUrls`, `m3u8Url`, `path`, audio | `fetchPlistSource`, `pickPlistMedia`; `audioPath` 使用 `file.plaso.cn/teaching` |
 | OSS direct document STS signed URL | `buildDirectDocumentSource`, `buildPlasoCourseSTSSignedURL` (OSS V4, V1 fallback) |
 | player URL XOR hex/兜底 HTML | `plasoPlayerURLEncrypt`, `buildPlayerSource` |
+| `file.plaso.cn` / `filecdn.plaso.*` 资源 URL | `resolveDirectResourceMedia`, `buildPlasoEventAudioURL` |
+| `ppt-player-*.plaso.com` native/static 资源入口 | `resolveNativeStaticMedia`, `plasoNativeStaticResources` |
 
 ## 验证
 

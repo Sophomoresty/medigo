@@ -11,6 +11,8 @@
 | Gaotu_Course.py:40 `live_url = 'https://interactive.gaotu.cn/live/api/live/zplan/playbackWeb'` | `liveURLFormat` + `endpointsFor()` | ✓ |
 | Gaotu_Course.py:41-42 Wenzai `getPlayUrl` / `getPlaybackInfoV4` | `video_play_url`, `live_play_url` with `%s` | ✓ |
 | Gaotu_Course.py:43-45 pan/file/price APIs | `sourceURLFormat`, `fileURLFormat`, `priceURLFormat` | ✓ |
+| Gaotu_Base.py:29 and brand subclasses `order_url` | `orderURLFormat` + `endpointsFor()` selects `api.gaotu.cn` / `api.gaotu100.com` / `api.gtgz.cn` / `api.naiyouxuexi.com` | ✓ |
+| Brand `User-Agent` strings | `gaotuUserAgent()` + `endpointsFor()` app/version mapping | ✓ |
 
 ## HTTP 调用
 
@@ -21,6 +23,8 @@
 | `_get_video_url` line 200 | `resolveLesson` | POST JSON | ✓ |
 | `_get_live_url` line 281 | `resolveLesson` | POST JSON | ✓ |
 | `_decode_video_url` / `_decode_inner_live_url` | `decodePcURL` | GET | ✓ |
+| `_get_order_price` | `fetchGaotuOrderPrice` | POST JSON | ✓ |
+| `_check_cookie` extracts `__user_token__` into `Sid` | `gaotuAuthFromCookies` | Cookie jar -> headers | ✓ |
 
 ## JSON 字段映射
 
@@ -29,8 +33,10 @@
 | `data.clazzDetailChapterPcVO.chapterItemVOList[].lessonCardList[]` | `collectLessons` keys `chapterItemVOList`, `lessonCardList` | ✓ |
 | `userClazzLessonBaseVO.clazzLessonName` | `lessonNode.Title` | ✓ |
 | `userClazzLessonBaseVO.clazzLessonNumber` | `lessonNode.ID` | ✓ |
-| `data.pcUrl` | `mediaFromPayload` + `collectStrings("pcUrl")` | ✓ |
-| Wenzai `data.cdn_list[].url/enc_url` | `findMediaURL` keys `url`, `enc_url` | ✓ |
+| `userClazzLessonBaseVO.bindType` | `lessonNode.Kind`, routes VOD vs live payload | ✓ |
+| `data.videoLiveDTO.pcUrl` / `data.signinLivePlayback.pcUrl` | `mediaFromPayload` + `collectStrings("pcUrl")` | ✓ |
+| Wenzai `data.play_info` / `data.signinLivePlayback` `cdn_list[].url/enc_url` | `gaotuMediaURLFromPayload`, `pickGaotuPlaybackURL`, `decodeBjcloudvod` | ✓ |
+| `data.payOrderList[].orderBaseVO.course.courseId` + `paymentInfo.originalPrice` | `gaotuOrderPriceFromPayload` | ✓ |
 
 ## 阻塞步骤
 

@@ -652,6 +652,20 @@ func isAudioMap(m map[string]any) bool {
 	return strings.Contains(t, "audio")
 }
 
+func buildPlasoEventAudioURL(mediaPath string) string {
+	mediaPath = strings.TrimSpace(strings.ReplaceAll(mediaPath, `\/`, `/`))
+	if mediaPath == "" {
+		return ""
+	}
+	if strings.HasPrefix(mediaPath, "http://") || strings.HasPrefix(mediaPath, "https://") {
+		return mediaPath
+	}
+	if strings.HasPrefix(mediaPath, "//") {
+		return "https:" + mediaPath
+	}
+	return "https://file.plaso.cn/teaching/" + strings.TrimLeft(mediaPath, "/")
+}
+
 func looksPolyvVID(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {

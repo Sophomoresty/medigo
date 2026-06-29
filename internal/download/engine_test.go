@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,8 +99,9 @@ func TestDownloadSegmentsCancelRemovesTempDir(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("TMPDIR", root)
 	started := make(chan struct{})
+	var startOnce sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		close(started)
+		startOnce.Do(func() { close(started) })
 		flusher, _ := w.(http.Flusher)
 		for i := 0; i < 128; i++ {
 			select {
@@ -151,4 +153,56 @@ func TestDownloadSegmentsCancelRemovesTempDir(t *testing.T) {
 			t.Fatalf("temporary directory still present: %s", entry.Name())
 		}
 	}
+}
+
+func TestDownloadDirectMirrorRetriesNextURL(t *testing.T) {
+	dir := t.TempDir()
+	var hits []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits = append(hits, r.URL.Path)
+		if r.URL.Path == "/bad" {
+			http.Error(w, "nope", http.StatusBadGateway)
+			return
+		}
+		if r.Header.Get("X-Test") != "good" {
+			t.Fatalf("X-Test header = %q, want good", r.Header.Get("X-Test"))
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	engine := New(Opts{OutputDir: dir, Overwrite: true, NoProgress: true})
+	info := &extractor.MediaInfo{Title: "mirror"}
+	stream := extractor.Stream{
+		URLs:   []string{server.URL + "/bad", server.URL + "/good"},
+		Format: "pdf",
+		Headers: map[string]string{
+			"X-Test": "default",
+		},
+		Extra: map[string]any{
+			"url_mode": "mirror",
+			"url_headers": map[string]map[string]string{
+				server.URL + "/good": {"X-Test": "good"},
+			},
+		},
+	}
+	outPath, err := engine.Download(info, stream)
+	if err != nil {
+		t.Fatalf("Download returned error: %v", err)
+	}
+	if string(mustReadFile(t, outPath)) != "ok" {
+		t.Fatalf("downloaded data mismatch")
+	}
+	if strings.Join(hits, ",") != "/bad,/good" {
+		t.Fatalf("hits = %#v, want bad then good", hits)
+	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }

@@ -42,6 +42,14 @@ func (c *Chaoxing) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 	client := util.NewClient()
 	client.SetCookieJar(opts.Cookies)
 	ctx := newChaoxingContext(client, opts.Cookies, rawURL)
+	if shouldValidateChaoxingLogin(rawURL) {
+		if err := validateChaoxingLogin(ctx); err != nil {
+			return nil, err
+		}
+	}
+	if isChaoxingSpaceIndexURL(rawURL) {
+		return ctx.resolveSpaceIndex(rawURL)
+	}
 
 	if objectID := extractObjectID(rawURL); objectID != "" {
 		entry, err := ctx.resolveObjectResource(chaoxingResource{Title: "chaoxing_video", Kind: "video", ObjectID: objectID, Ext: "mp4"})
@@ -56,8 +64,10 @@ func (c *Chaoxing) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 		}
 	}
 	if liveID := extractZhiboLiveID(rawURL); liveID != "" {
-		if entry := ctx.resolveLiveResource(chaoxingResource{Title: "chaoxing_live_" + liveID, Kind: "live", LiveID: liveID}); entry != nil {
+		if entry, err := ctx.resolveZhiboLiveEntry(liveID, extractChaoxingUUID(rawURL)); err == nil && entry != nil {
 			return entry, nil
+		} else if err != nil {
+			return nil, err
 		}
 	}
 
@@ -110,17 +120,21 @@ func extractZhiboLiveID(raw string) string {
 	if err != nil || !strings.Contains(strings.ToLower(u.Host), "zhibo.chaoxing.com") {
 		return ""
 	}
-	return strings.Trim(strings.TrimSpace(u.Path), "/")
+	if path := strings.Trim(strings.TrimSpace(u.Path), "/"); regexp.MustCompile(`^\d+$`).MatchString(path) {
+		return path
+	}
+	return ""
 }
 
 const (
-	defaultCourseHost = "https://mooc1.chaoxing.com"
-	defaultNewHost    = "https://mooc2-ans.chaoxing.com"
-	defaultPublicHost = "https://mooc1.xueyinonline.com"
-	audioListURL      = "https://appswh.chaoxing.com/vclass/page/viewlist/data?uuid=%s"
-	audioUpdateURL    = "https://appswh.chaoxing.com/vclass/page/update/data?pageId=%s&objectId=%s"
-	meetReviewURL     = "https://k.chaoxing.com/apis/chapter/getMeetReview4Job?crossOrigin=true&uuid=%s"
-	yunFileURL        = "https://k.chaoxing.com/apis/file/getYunFile?crossOrigin=true&objectId=%s&key="
+	defaultCourseHost    = "https://mooc1.chaoxing.com"
+	defaultNewHost       = "https://mooc2-ans.chaoxing.com"
+	defaultPublicHost    = "https://mooc1.xueyinonline.com"
+	defaultLiveHost      = "https://zhibo.chaoxing.com"
+	audioListURL         = "https://appswh.chaoxing.com/vclass/page/viewlist/data?uuid=%s"
+	audioUpdateURL       = "https://appswh.chaoxing.com/vclass/page/update/data?pageId=%s&objectId=%s"
+	defaultMeetReviewURL = "https://k.chaoxing.com/apis/chapter/getMeetReview4Job?crossOrigin=true&uuid=%s"
+	defaultYunFileURL    = "https://k.chaoxing.com/apis/file/getYunFile?crossOrigin=true&objectId=%s&key="
 
 	portalNewHeaderURL = "https://www.xueyinonline.com/portal/new-header?cur=1"
 )
@@ -143,6 +157,10 @@ type chaoxingContext struct {
 	portalCourseEnc string
 	portalT         string
 	downpath        string
+	livePageURL     string
+	meetReviewURL   string
+	yunFileURL      string
+	sourceHost      string
 	title           string
 	headers         map[string]string
 }
@@ -155,6 +173,9 @@ func newChaoxingContext(c *util.Client, jar http.CookieJar, rawURL string) *chao
 		newCourseURL:    defaultNewHost,
 		publicCourseURL: defaultPublicHost,
 		downpath:        "https://cs-ans.chaoxing.com",
+		livePageURL:     defaultLiveHost,
+		meetReviewURL:   defaultMeetReviewURL,
+		yunFileURL:      defaultYunFileURL,
 		headers: map[string]string{
 			"Accept":  "text/html,application/xhtml+xml,application/xml;q=0.9,application/json,*/*;q=0.8",
 			"Referer": defaultCourseHost + "/",
@@ -162,28 +183,7 @@ func newChaoxingContext(c *util.Client, jar http.CookieJar, rawURL string) *chao
 		},
 	}
 	if u, err := url.Parse(rawURL); err == nil && u.Scheme != "" && u.Host != "" {
-		host := strings.ToLower(u.Host)
-		for _, marker := range []string{"/mycourse/stu", "/mycourse/studentcourse"} {
-			if idx := strings.Index(u.Path, marker); idx >= 0 {
-				ctx.pathPrefix = u.Path[:idx]
-				break
-			}
-		}
-		if ctx.pathPrefix != "" && strings.Contains(u.Path, "/course/") {
-			ctx.pathPrefix = u.Path[:strings.Index(u.Path, "/course/")]
-		}
-		if strings.Contains(u.Path, "/mooc2-ans/") || strings.EqualFold(u.Query().Get("mooc2"), "1") {
-			ctx.newCourse = true
-		}
-		if strings.Contains(host, "chaoxing.com") && !strings.Contains(host, "mooc2-ans") {
-			ctx.courseURL = u.Scheme + "://" + u.Host
-			ctx.headers["Referer"] = ctx.courseURL + "/"
-			ctx.headers["Origin"] = ctx.courseURL
-		}
-		if strings.Contains(host, "mooc2-ans") {
-			ctx.newCourseURL = u.Scheme + "://" + u.Host
-			ctx.newCourse = true
-		}
+		ctx.applyURLContext(u.String())
 	}
 	ctx.extractAccessFromURL(rawURL)
 	return ctx
@@ -198,4 +198,83 @@ func (x *chaoxingContext) abs(path string) string {
 
 func (x *chaoxingContext) getString(rawURL string) (string, error) {
 	return x.c.GetString(rawURL, x.headers)
+}
+
+func shouldValidateChaoxingLogin(rawURL string) bool {
+	low := strings.ToLower(rawURL)
+	return strings.Contains(low, "i.mooc.chaoxing.com/space/index") || strings.Contains(low, "xueyinonline.com/portal/new-header")
+}
+
+func isChaoxingSchoolHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	if strings.Contains(host, "xueyinonline.com") {
+		return false
+	}
+	return true
+}
+
+func validateChaoxingLogin(ctx *chaoxingContext) error {
+	if ctx == nil || ctx.sourceHost == "" {
+		return nil
+	}
+	host := strings.ToLower(ctx.sourceHost)
+	if !strings.Contains(host, "chaoxing.com") && !strings.Contains(host, "xueyinonline.com") {
+		return nil
+	}
+	spaceURL := "https://i.mooc.chaoxing.com/space/index"
+	body, err := ctx.getString(spaceURL)
+	if err != nil {
+		return fmt.Errorf("chaoxing login check failed: %w", err)
+	}
+	if !hasChaoxingPersonalName(body) {
+		return fmt.Errorf("chaoxing login check failed: i.mooc.chaoxing.com/space/index missing personalName")
+	}
+	body, err = ctx.getString(portalNewHeaderURL)
+	if err != nil {
+		return fmt.Errorf("chaoxing login check failed: %w", err)
+	}
+	if !strings.Contains(body, `id="logout"`) {
+		return fmt.Errorf("chaoxing login check failed: portal/new-header missing logout")
+	}
+	return nil
+}
+
+func (x *chaoxingContext) resolveZhiboLiveEntry(liveID, uuid string) (*extractor.MediaInfo, error) {
+	title := x.fetchZhiboLiveTitle(liveID, uuid)
+	if title == "" {
+		title = "超星直播_" + firstNonEmpty(liveID, uuid)
+	}
+	entry := x.resolveLiveResource(chaoxingResource{
+		Title:  title,
+		Kind:   "live",
+		LiveID: liveID,
+		UUID:   uuid,
+	})
+	if entry == nil {
+		return nil, fmt.Errorf("chaoxing: no playable zhibo live resource found")
+	}
+	return entry, nil
+}
+
+func (x *chaoxingContext) fetchZhiboLiveTitle(liveID, uuid string) string {
+	if liveID == "" {
+		return ""
+	}
+	base := strings.TrimRight(firstNonEmpty(x.livePageURL, defaultLiveHost), "/")
+	body, err := x.getString(base + "/" + url.PathEscape(liveID))
+	if err != nil || strings.TrimSpace(body) == "" {
+		return ""
+	}
+	if m := regexp.MustCompile(`(?is)<meta\s*itemprop="name"\s*content="([^"]*?)"\s*/?>`).FindStringSubmatch(body); len(m) > 1 {
+		if title := cleanText(m[1]); title != "" {
+			return util.SanitizeFilename(title)
+		}
+	}
+	if uuid != "" {
+		return util.SanitizeFilename("超星直播_" + uuid)
+	}
+	return ""
 }

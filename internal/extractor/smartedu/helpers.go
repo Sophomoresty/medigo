@@ -58,30 +58,116 @@ func selectFileItem(r map[string]any) map[string]any {
 }
 
 func itemURL(it map[string]any) string {
+	urls := itemURLs(it)
+	if len(urls) == 0 {
+		return ""
+	}
+	return urls[0]
+}
+
+func itemURLs(it map[string]any) []string {
 	for _, k := range []string{"ti_storage", "url", "download_url", "href"} {
 		if u := str(it[k]); u != "" {
-			return normalizeStorage(u)
+			return normalizeStorageCandidates(u)
 		}
 	}
 	if arr, ok := it["ti_storages"].([]any); ok {
 		for _, v := range arr {
 			if m, ok := v.(map[string]any); ok {
-				if u := str(m["ti_storage"]); u != "" {
-					return normalizeStorage(u)
+				for _, k := range []string{"ti_storage", "storage", "url", "download_url", "href", "ti_url"} {
+					if u := str(m[k]); u != "" {
+						return normalizeStorageCandidates(u)
+					}
+				}
+				if nested, ok := m["storage"].(map[string]any); ok {
+					for _, k := range []string{"ti_storage", "storage", "url", "download_url", "href", "ti_url"} {
+						if u := str(nested[k]); u != "" {
+							return normalizeStorageCandidates(u)
+						}
+					}
 				}
 			}
 		}
 	}
-	return ""
+	return nil
 }
 
 func normalizeStorage(s string) string {
-	s = strings.TrimSpace(strings.ReplaceAll(s, `\/`, `/`))
-	if s == "" {
+	urls := normalizeStorageCandidates(s)
+	if len(urls) == 0 {
 		return ""
 	}
-	s = strings.ReplaceAll(s, "cs_path:${ref-path}", privateHost)
-	return normalize(s, privateHost)
+	return urls[0]
+}
+
+func normalizeStorageCandidates(s string) []string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, `\/`, `/`))
+	if s == "" {
+		return nil
+	}
+	if strings.Contains(s, "cs_path:${ref-path}") {
+		out := make([]string, 0, len(privateHosts))
+		for _, host := range privateHosts {
+			out = append(out, normalize(strings.ReplaceAll(s, "cs_path:${ref-path}", host), host))
+		}
+		return dedupeStrings(out)
+	}
+	normalized := normalize(s, privateHost)
+	if expanded := expandSmarteduCDNHosts(normalized); len(expanded) > 0 {
+		return expanded
+	}
+	return []string{normalized}
+}
+
+func expandSmarteduCDNHosts(raw string) []string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !u.IsAbs() || u.Host == "" {
+		return nil
+	}
+	for _, hosts := range [][]string{privateHosts, publicHosts, overseaHosts} {
+		if !hostInList(u.Host, hosts) {
+			continue
+		}
+		out := make([]string, 0, len(hosts))
+		for _, host := range hosts {
+			next := *u
+			if parsed, err := url.Parse(host); err == nil && parsed.Host != "" {
+				next.Scheme = firstNonEmpty(parsed.Scheme, next.Scheme)
+				next.Host = parsed.Host
+			}
+			out = append(out, next.String())
+		}
+		return dedupeStrings(out)
+	}
+	return nil
+}
+
+func hostInList(host string, hosts []string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	for _, raw := range hosts {
+		u, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		if strings.EqualFold(h, u.Host) {
+			return true
+		}
+	}
+	return false
+}
+
+func dedupeStrings(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 func relationResources(m map[string]any) []map[string]any {
@@ -233,6 +319,13 @@ func privateToPublic(s string) string {
 	u.Host = strings.Replace(strings.Replace(u.Host, "-private.", ".", 1), "ndr-private.", "ndr.", 1)
 	return u.String()
 }
+func privateURLsToPublic(urls []string) []string {
+	out := make([]string, 0, len(urls))
+	for _, u := range urls {
+		out = append(out, privateToPublic(u))
+	}
+	return dedupeStrings(out)
+}
 
 func (x *smCtx) prepareM3U8(raw string) (string, string, error) {
 	text, err := x.c.GetString(raw, x.requestHeaders(raw, true))
@@ -244,6 +337,24 @@ func (x *smCtx) prepareM3U8(raw string) (string, string, error) {
 	}
 	rewritten := x.absoluteM3U8Text(text, raw)
 	return smarteduM3U8DataURL(rewritten), rewritten, nil
+}
+
+func (x *smCtx) prepareM3U8Candidates(urls []string) (string, string, string, error) {
+	var last error
+	for _, raw := range urls {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		dataURL, manifest, err := x.prepareM3U8(raw)
+		if err == nil && dataURL != "" {
+			return dataURL, manifest, raw, nil
+		}
+		last = err
+	}
+	if last != nil {
+		return "", "", "", last
+	}
+	return "", "", "", fmt.Errorf("smartedu: empty m3u8 URL candidates")
 }
 
 func (x *smCtx) absoluteM3U8Text(text, base string) string {

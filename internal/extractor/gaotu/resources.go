@@ -35,6 +35,64 @@ func fetchGaotuPrice(c *util.Client, headers map[string]string, endpoints gaotuE
 	return price, ok
 }
 
+func fetchGaotuOrderPrice(c *util.Client, headers map[string]string, endpoints gaotuEndpoints, clazz string) (float64, bool) {
+	if clazz == "" {
+		return 0, false
+	}
+	payload, err := postJSON(c, endpoints.orderURL(), map[string]any{
+		"command": map[string]any{
+			"scroller":      map[string]any{"pageSize": 999},
+			"payStatusType": 0,
+		},
+	}, headers)
+	if err != nil {
+		return 0, false
+	}
+	return gaotuOrderPriceFromPayload(payload, clazz)
+}
+
+func gaotuOrderPriceFromPayload(v any, clazz string) (float64, bool) {
+	switch x := v.(type) {
+	case map[string]any:
+		if course := valueString(firstMap(x, "orderBaseVO", "course"), "courseId", "courseID", "clazzNumber"); course != "" && fmt.Sprint(course) == fmt.Sprint(clazz) {
+			if price, ok := gaotuCentsToPrice(firstMap(x, "paymentInfo")["originalPrice"]); ok {
+				return price, true
+			}
+			if price, ok := gaotuCentsToPrice(firstMap(x, "paymentInfo")["price"]); ok {
+				return price, true
+			}
+			return 0, true
+		}
+		for _, child := range x {
+			if price, ok := gaotuOrderPriceFromPayload(child, clazz); ok {
+				return price, true
+			}
+		}
+	case []any:
+		for _, child := range x {
+			if price, ok := gaotuOrderPriceFromPayload(child, clazz); ok {
+				return price, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func firstMap(m map[string]any, keys ...string) map[string]any {
+	var cur any = m
+	for _, key := range keys {
+		next, ok := cur.(map[string]any)
+		if !ok {
+			return map[string]any{}
+		}
+		cur = next[key]
+	}
+	if out, ok := cur.(map[string]any); ok {
+		return out
+	}
+	return map[string]any{}
+}
+
 func gaotuPriceFromPayload(v any) (float64, bool) {
 	switch x := v.(type) {
 	case map[string]any:
@@ -277,7 +335,7 @@ func resolveGaotuFileURL(c *util.Client, headers map[string]string, endpoints ga
 			return raw
 		}
 	}
-	if media := findMediaURL(payload); media != "" {
+	if media := gaotuMediaURLFromPayload(payload); media != "" {
 		return media
 	}
 	if raw := firstHTTPURL(payload); raw != "" {

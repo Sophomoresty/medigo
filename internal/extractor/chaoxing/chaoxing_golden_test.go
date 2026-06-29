@@ -146,13 +146,18 @@ func TestResolveCourseTraversesAjaxCardsAndResources(t *testing.T) {
 		}
 		w.Write([]byte(`{"temp":{"data":{"mp4Url":"https://cdn.example/live.mp4"}}}`))
 	})
+	mux.HandleFunc("/meet-review", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[]}`))
+	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
 	ctx := &chaoxingContext{
-		c:         util.NewClient(),
-		courseURL: srv.URL,
-		headers:   map[string]string{"Referer": srv.URL + "/"},
+		c:             util.NewClient(),
+		courseURL:     srv.URL,
+		meetReviewURL: srv.URL + "/meet-review?uuid=%s",
+		yunFileURL:    srv.URL + "/yun-file?objectId=%s",
+		headers:       map[string]string{"Referer": srv.URL + "/"},
 	}
 	info, pageObjectID, err := ctx.resolveCourse(srv.URL + "/entry?courseId=1&clazzid=2&enc=abc&cpi=9")
 	if err != nil {
@@ -356,5 +361,116 @@ func TestResolvePublicCourseFallback(t *testing.T) {
 	assertEntryURL(t, info.Entries, "https://cdn.example/public.mp4")
 	if got := info.Entries[0].Extra["source"]; got != "public-course" {
 		t.Fatalf("entry source = %#v, want public-course", got)
+	}
+}
+
+func TestResolveSpaceIndexCourses(t *testing.T) {
+	mux := http.NewServeMux()
+	coursePage := `
+<html><head><title>Space Course</title></head><body>
+<input id="courseId" value="1"><input id="clazzid" value="2"><input id="enc" value="abc"><input id="cpi" value="9">
+<div class="chapter_item" title="Lesson One" onclick="toOld('1','101','3')"></div>
+</body></html>`
+	mux.HandleFunc("/space/index", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html><body><p class="personalName">Alice</p><a href="/mycourse/studentcourse?courseId=1&clazzid=2&enc=abc&cpi=9">Space Course</a></body></html>`))
+	})
+	mux.HandleFunc("/mycourse/studentcourse", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("courseId") != "1" || r.URL.Query().Get("clazzid") != "2" || r.URL.Query().Get("enc") != "abc" {
+			t.Fatalf("unexpected space studentcourse query: %s", r.URL.RawQuery)
+		}
+		w.Write([]byte(coursePage))
+	})
+	mux.HandleFunc("/mycourse/studentstudyAjax", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if r.Form.Get("chapterId") != "101" || r.Form.Get("courseId") != "1" || r.Form.Get("clazzid") != "2" {
+			t.Fatalf("unexpected ajax form: %#v", r.Form)
+		}
+		w.Write([]byte(`getClazzDetail('1','101','1','1','')`))
+	})
+	mux.HandleFunc("/knowledge/cards", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<script>mArg = {"attachments":[{"property":{"name":"Space.mp4","objectid":"oid-space","type":".mp4"}}]};</script>`))
+	})
+	mux.HandleFunc("/ananas/status/oid-space", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"filename":"Space.mp4","download":"https://cdn.example/space.mp4"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	ctx := &chaoxingContext{
+		c:               util.NewClient(),
+		courseURL:       srv.URL,
+		newCourseURL:    srv.URL,
+		publicCourseURL: srv.URL,
+		downpath:        "https://cs-ans.chaoxing.com",
+		headers:         map[string]string{"Referer": srv.URL + "/"},
+	}
+	info, err := ctx.resolveSpaceIndex(srv.URL + "/space/index")
+	if err != nil {
+		t.Fatalf("resolveSpaceIndex returned error: %v", err)
+	}
+	if info.Title != "chaoxing_space_courses" {
+		t.Fatalf("space title = %q, want chaoxing_space_courses", info.Title)
+	}
+	if len(info.Entries) != 1 {
+		t.Fatalf("entries = %d, want 1: %#v", len(info.Entries), info.Entries)
+	}
+	assertEntryURL(t, info.Entries, "https://cdn.example/space.mp4")
+	if got := info.Entries[0].Extra["source"]; got != "i.mooc.space" {
+		t.Fatalf("entry source = %#v, want i.mooc.space", got)
+	}
+}
+
+func TestResolveZhiboLivePrefersMeetReview(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/zhibo/123", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html><head><meta itemprop="name" content="Nice Live" /></head></html>`))
+	})
+	mux.HandleFunc("/ananas/live/liveinfo", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("liveid") != "123" {
+			t.Fatalf("liveid = %q, want 123", r.URL.Query().Get("liveid"))
+		}
+		w.Write([]byte(`{"temp":{"data":{"mp4Url":"https://cdn.example/live-direct.mp4"}}}`))
+	})
+	mux.HandleFunc("/meet", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("uuid") != "uuid-abc" {
+			t.Fatalf("uuid = %q, want uuid-abc", r.URL.Query().Get("uuid"))
+		}
+		w.Write([]byte(`{"data":[{"objectId":"oid-review"}]}`))
+	})
+	mux.HandleFunc("/yun", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("objectId") != "oid-review" {
+			t.Fatalf("objectId = %q, want oid-review", r.URL.Query().Get("objectId"))
+		}
+		w.Write([]byte(`{"data":{"download":"https://cdn.example/live-review.mp4","http":"https://cdn.example/live-http.mp4"}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	ctx := &chaoxingContext{
+		c:             util.NewClient(),
+		courseURL:     srv.URL,
+		livePageURL:   srv.URL + "/zhibo",
+		meetReviewURL: srv.URL + "/meet?crossOrigin=true&uuid=%s",
+		yunFileURL:    srv.URL + "/yun?crossOrigin=true&objectId=%s&key=",
+		headers:       map[string]string{"Referer": srv.URL + "/"},
+	}
+	entry, err := ctx.resolveZhiboLiveEntry("123", "uuid-abc")
+	if err != nil {
+		t.Fatalf("resolveZhiboLiveEntry returned error: %v", err)
+	}
+	if entry.Title != "Nice Live" {
+		t.Fatalf("entry title = %q, want Nice Live", entry.Title)
+	}
+	assertEntryURL(t, []*extractor.MediaInfo{entry}, "https://cdn.example/live-review.mp4")
+}
+
+func TestExtractZhiboLiveIDRequiresNumericID(t *testing.T) {
+	if got := extractZhiboLiveID("https://zhibo.chaoxing.com/12345?x=1"); got != "12345" {
+		t.Fatalf("live id = %q, want 12345", got)
+	}
+	if got := extractZhiboLiveID("https://zhibo.chaoxing.com/not-a-live-id"); got != "" {
+		t.Fatalf("non-numeric live id = %q, want empty", got)
 	}
 }

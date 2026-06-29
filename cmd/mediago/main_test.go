@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"strings"
@@ -23,6 +24,27 @@ func (s *stubPlaylistExtractor) Extract(rawURL string, opts *extractor.ExtractOp
 		Entries: []*extractor.MediaInfo{
 			{Title: "Entry 1"},
 			{Title: "Entry 2"},
+		},
+	}, nil
+}
+
+type stubSingleExtractor struct{}
+
+func (s *stubSingleExtractor) Patterns() []string {
+	return []string{`example\.com/stub-single`}
+}
+
+func (s *stubSingleExtractor) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.MediaInfo, error) {
+	return &extractor.MediaInfo{
+		Site:  "Example",
+		Title: "Stub Single",
+		Streams: map[string]extractor.Stream{
+			"1080p": {
+				Quality: "1080p",
+				URLs:    []string{"https://media.example.com/video-1080.mp4"},
+				Format:  "mp4",
+				Size:    1024,
+			},
 		},
 	}, nil
 }
@@ -68,6 +90,73 @@ func TestProcessURLPlaylistOutputsExtractionAndDownloadCounts(t *testing.T) {
 	}
 	if strings.TrimSpace(stdout) != "" {
 		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+}
+
+func TestProcessURLDumpJSONUsesExtractorResult(t *testing.T) {
+	extractor.Register(&stubSingleExtractor{}, extractor.SiteInfo{Name: "ExampleSingle", URL: "example.com/stub-single"})
+
+	oldSimulate := simulate
+	oldDumpJSON := dumpJSON
+	oldListFormats := listFormats
+	oldFormatSpec := formatSpec
+	simulate = false
+	dumpJSON = true
+	listFormats = false
+	formatSpec = "best"
+	t.Cleanup(func() {
+		simulate = oldSimulate
+		dumpJSON = oldDumpJSON
+		listFormats = oldListFormats
+		formatSpec = oldFormatSpec
+	})
+
+	stdout, stderr := captureStdStreams(t, func() {
+		if err := processURL(context.Background(), "https://example.com/stub-single"); err != nil {
+			t.Fatalf("processURL returned error: %v", err)
+		}
+	})
+
+	var got extractor.MediaInfo
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("stdout is not MediaInfo JSON: %v\n%s", err, stdout)
+	}
+	if got.Site != "Example" || got.Title != "Stub Single" {
+		t.Fatalf("unexpected JSON media: %#v", got)
+	}
+	if !strings.Contains(stderr, "[info] Extracting: ExampleSingle https://example.com/stub-single") {
+		t.Fatalf("stderr missing extracting line: %q", stderr)
+	}
+}
+
+func TestProcessURLListFormatsPrintsFormatTable(t *testing.T) {
+	extractor.Register(&stubSingleExtractor{}, extractor.SiteInfo{Name: "ExampleFormats", URL: "example.com/stub-single"})
+
+	oldSimulate := simulate
+	oldDumpJSON := dumpJSON
+	oldListFormats := listFormats
+	oldFormatSpec := formatSpec
+	simulate = false
+	dumpJSON = false
+	listFormats = true
+	formatSpec = "best"
+	t.Cleanup(func() {
+		simulate = oldSimulate
+		dumpJSON = oldDumpJSON
+		listFormats = oldListFormats
+		formatSpec = oldFormatSpec
+	})
+
+	stdout, _ := captureStdStreams(t, func() {
+		if err := processURL(context.Background(), "https://example.com/stub-single"); err != nil {
+			t.Fatalf("processURL returned error: %v", err)
+		}
+	})
+
+	for _, want := range []string{"QUALITY", "1080p", "mp4", "1.0KiB"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %q: %s", want, stdout)
+		}
 	}
 }
 

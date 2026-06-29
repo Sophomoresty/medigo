@@ -201,6 +201,9 @@ func (x *chaoxingContext) newCoursePrefix() string {
 	if strings.HasPrefix(prefix, "/mooc2-ans") {
 		return prefix
 	}
+	if isChaoxingSchoolHost(x.sourceHost) {
+		return "/mooc2-ans/mooc2-ans"
+	}
 	return "/mooc2-ans"
 }
 

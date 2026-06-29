@@ -25,7 +25,6 @@ const (
 	special1    = "https://bdcs-file-1.ykt.cbern.com.cn/zxx"
 	special2    = "https://s-file-2.ykt.cbern.com.cn/zxx"
 	special3    = "https://s-file-1.ykt.cbern.com.cn/zxx"
-	privateHost = "https://r1-ndr-private.ykt.cbern.com.cn"
 
 	nationalResourceDetailURL            = "%s/ndrv2/national_lesson/resources/details/%s.json"
 	nationalRelationResourceURL          = "%s/ndrs/national_lesson/resources/%s/relation_resource.json"
@@ -45,6 +44,25 @@ const (
 	tchMaterialThematicDetailURL         = "%s/ndrs/special_edu/resources/details/%s.json"
 	tchMaterialThematicTreeURL           = "%s/ndrs/special_edu/thematic_course/trees/%s.json"
 	tchMaterialThematicResourcesURL      = "%s/ndrs/special_edu/thematic_course/%s/resources/list.json"
+)
+
+var (
+	privateHosts = []string{
+		"https://r1-ndr-private.ykt.cbern.com.cn",
+		"https://r2-ndr-private.ykt.cbern.com.cn",
+		"https://r3-ndr-private.ykt.cbern.com.cn",
+	}
+	publicHosts = []string{
+		"https://r1-ndr.ykt.cbern.com.cn",
+		"https://r2-ndr.ykt.cbern.com.cn",
+		"https://r3-ndr.ykt.cbern.com.cn",
+	}
+	overseaHosts = []string{
+		"https://r1-ndr-oversea.ykt.cbern.com.cn",
+		"https://r2-ndr-oversea.ykt.cbern.com.cn",
+		"https://r3-ndr-oversea.ykt.cbern.com.cn",
+	}
+	privateHost = privateHosts[0]
 )
 
 var patterns = []string{`(?:[\w-]+\.)?smartedu\.cn/`}
@@ -68,7 +86,9 @@ type smCtx struct {
 
 type sourceItem struct {
 	kind, url, fmt, name, title, id string
+	urls                            []string
 	headers                         map[string]string
+	urlHeaders                      map[string]map[string]string
 	size                            int64
 	extra                           map[string]any
 }
@@ -398,24 +418,36 @@ func (x *smCtx) sourceFromResource(r map[string]any, idx int, contentType string
 	id := str(r["id"])
 	if it := selectVideoItem(r); it != nil {
 		fmtv := strings.ToLower(firstNonEmpty(str(it["ti_format"]), extFormat(itemURL(it))))
-		u := x.withAccess(itemURL(it))
+		urls := x.withAccesses(itemURLs(it))
+		u := firstURL(urls)
 		headers := x.requestHeaders(u, true)
 		extra := map[string]any{"source_url": u}
+		if len(urls) > 1 {
+			extra["source_urls"] = urls
+		}
 		if isM3U8URL(u, fmtv) {
-			if dataURL, manifest, err := x.prepareM3U8(u); err == nil && dataURL != "" {
+			if dataURL, manifest, srcURL, err := x.prepareM3U8Candidates(urls); err == nil && dataURL != "" {
 				extra["m3u8_text"] = manifest
+				extra["source_url"] = srcURL
 				u = dataURL
+				headers = x.requestHeaders(srcURL, true)
+				urls = []string{dataURL}
 				fmtv = "m3u8"
 			}
 		}
-		return sourceItem{kind: "video", url: u, fmt: firstNonEmpty(fmtv, "m3u8"), name: fmt.Sprintf("(%d)--%s", idx, title), title: title, id: id, headers: headers, size: itemSize(it), extra: extra}
+		return sourceItem{kind: "video", url: u, urls: urls, fmt: firstNonEmpty(fmtv, "m3u8"), name: fmt.Sprintf("(%d)--%s", idx, title), title: title, id: id, headers: headers, urlHeaders: x.requestHeadersForURLs(urls, true), size: itemSize(it), extra: extra}
 	}
 	if it := selectFileItem(r); it != nil {
-		u := x.withAccess(itemURL(it))
+		urls := x.withAccesses(itemURLs(it))
 		if contentType == "thematic_course" && str(it["ti_file_flag"]) == "source" {
-			u = privateToPublic(u)
+			urls = privateURLsToPublic(urls)
 		}
-		return sourceItem{kind: "file", url: u, fmt: strings.ToLower(firstNonEmpty(str(it["ti_format"]), extFormat(u))), name: fmt.Sprintf("(%d)--%s", idx, title), title: title, id: id, headers: x.requestHeaders(u, true), size: itemSize(it), extra: map[string]any{"source_url": u}}
+		u := firstURL(urls)
+		extra := map[string]any{"source_url": u}
+		if len(urls) > 1 {
+			extra["source_urls"] = urls
+		}
+		return sourceItem{kind: "file", url: u, urls: urls, fmt: strings.ToLower(firstNonEmpty(str(it["ti_format"]), extFormat(u))), name: fmt.Sprintf("(%d)--%s", idx, title), title: title, id: id, headers: x.requestHeaders(u, true), urlHeaders: x.requestHeadersForURLs(urls, true), size: itemSize(it), extra: extra}
 	}
 	return sourceItem{}
 }
@@ -435,6 +467,37 @@ func (x *smCtx) withAccess(raw string) string {
 	return u.String()
 }
 
+func (x *smCtx) withAccesses(urls []string) []string {
+	out := make([]string, 0, len(urls))
+	for _, raw := range urls {
+		out = append(out, x.withAccess(raw))
+	}
+	return dedupeStrings(out)
+}
+
+func (x *smCtx) requestHeadersForURLs(urls []string, auth bool) map[string]map[string]string {
+	out := make(map[string]map[string]string, len(urls))
+	for _, raw := range urls {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		out[raw] = x.requestHeaders(raw, auth)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func firstURL(urls []string) string {
+	for _, u := range urls {
+		if strings.TrimSpace(u) != "" {
+			return strings.TrimSpace(u)
+		}
+	}
+	return ""
+}
+
 func mediaFromSources(title string, srcs []sourceItem) (*extractor.MediaInfo, error) {
 	if len(srcs) == 0 {
 		return nil, fmt.Errorf("smartedu: no playable resource found")
@@ -445,7 +508,17 @@ func mediaFromSources(title string, srcs []sourceItem) (*extractor.MediaInfo, er
 			headers = map[string]string{"Referer": refererURL}
 		}
 		format := firstNonEmpty(src.fmt, "mp4")
-		stream := extractor.Stream{Quality: src.kind, URLs: []string{src.url}, Format: format, Size: src.size, Headers: headers}
+		urls := dedupeStrings(src.urls)
+		if len(urls) == 0 && src.url != "" {
+			urls = []string{src.url}
+		}
+		stream := extractor.Stream{Quality: src.kind, URLs: urls, Format: format, Size: src.size, Headers: headers}
+		if len(urls) > 1 {
+			stream.Extra = map[string]any{"url_mode": "mirror", "cdn_nodes": true}
+			if len(src.urlHeaders) > 0 {
+				stream.Extra["url_headers"] = src.urlHeaders
+			}
+		}
 		if format == "m3u8" {
 			stream.NeedMerge = true
 		}

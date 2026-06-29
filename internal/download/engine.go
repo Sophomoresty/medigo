@@ -21,13 +21,13 @@ import (
 )
 
 type Opts struct {
-	Concurrency      int
-	OutputDir        string
-	Overwrite        bool
-	Retries          int
-	NoProgress       bool
-	Proxy            string
-	Context          context.Context
+	Concurrency       int
+	OutputDir         string
+	Overwrite         bool
+	Retries           int
+	NoProgress        bool
+	Proxy             string
+	Context           context.Context
 	MergeOutputFormat string
 }
 
@@ -145,8 +145,56 @@ func (e *Engine) downloadDirect(filename string, stream extractor.Stream) (strin
 	if len(stream.URLs) == 1 {
 		return outPath, e.downloadSingle(stream.URLs[0], outPath, stream.Headers, stream.Size)
 	}
+	if streamURLsAreMirrors(stream) {
+		return outPath, e.downloadMirrorsWithHeaders(stream.URLs, outPath, stream.Headers, streamURLHeaders(stream), stream.Size)
+	}
 
 	return outPath, e.downloadSegments(stream.URLs, outPath, stream.Headers, stream.Size)
+}
+
+func streamURLsAreMirrors(stream extractor.Stream) bool {
+	if len(stream.URLs) <= 1 || stream.Extra == nil {
+		return false
+	}
+	if mode, ok := stream.Extra["url_mode"].(string); ok && strings.EqualFold(mode, "mirror") {
+		return true
+	}
+	if v, ok := stream.Extra["cdn_nodes"].(bool); ok && v {
+		return true
+	}
+	return false
+}
+
+func (e *Engine) downloadMirrors(urls []string, outPath string, headers map[string]string, size int64) error {
+	return e.downloadMirrorsWithHeaders(urls, outPath, headers, nil, size)
+}
+
+func (e *Engine) downloadMirrorsWithHeaders(urls []string, outPath string, headers map[string]string, perURLHeaders map[string]map[string]string, size int64) error {
+	var last error
+	for _, raw := range urls {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		_ = os.Remove(outPath + ".part")
+		h := headers
+		if perURLHeaders != nil {
+			if uh := perURLHeaders[raw]; len(uh) > 0 {
+				h = uh
+			}
+		}
+		if err := e.downloadSingle(raw, outPath, h, size); err != nil {
+			last = err
+			if ctxErr := e.ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			continue
+		}
+		return nil
+	}
+	if last != nil {
+		return last
+	}
+	return fmt.Errorf("no URLs in stream")
 }
 
 func (e *Engine) downloadSingle(url, outPath string, headers map[string]string, size int64) error {

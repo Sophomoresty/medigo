@@ -166,6 +166,21 @@ func firstPlayableURL(mi *extractor.MediaInfo) string {
 	return ""
 }
 
+func findEntryByTitle(mi *extractor.MediaInfo, titlePart string) *extractor.MediaInfo {
+	if mi == nil {
+		return nil
+	}
+	if strings.Contains(mi.Title, titlePart) {
+		return mi
+	}
+	for _, entry := range mi.Entries {
+		if got := findEntryByTitle(entry, titlePart); got != nil {
+			return got
+		}
+	}
+	return nil
+}
+
 func TestExtractMock(t *testing.T) {
 	fixtures := loadFixtures(t)
 	installMockTransport(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -197,5 +212,79 @@ func TestExtractMock(t *testing.T) {
 	got := firstPlayableURL(info)
 	if !strings.Contains(got, "cdn.example.com/smartedu.mp4") {
 		t.Fatalf("playable URL %q does not contain expected fixture URL", got)
+	}
+
+	fileEntry := findEntryByTitle(info, "Smartedu Private File")
+	if fileEntry == nil {
+		t.Fatalf("private file entry not found in %#v", info)
+	}
+	stream := fileEntry.Streams["default"]
+	wantHosts := []string{
+		"r1-ndr-private.ykt.cbern.com.cn",
+		"r2-ndr-private.ykt.cbern.com.cn",
+		"r3-ndr-private.ykt.cbern.com.cn",
+	}
+	if len(stream.URLs) != len(wantHosts) {
+		t.Fatalf("private CDN URLs = %d, want %d: %#v", len(stream.URLs), len(wantHosts), stream.URLs)
+	}
+	for i, host := range wantHosts {
+		if !strings.Contains(stream.URLs[i], host+"/edu_product/esp/assets/private.pdf") {
+			t.Fatalf("private CDN URL[%d] = %q, want host %s", i, stream.URLs[i], host)
+		}
+		if !strings.Contains(stream.URLs[i], "token=abc") {
+			t.Fatalf("private CDN URL[%d] lost query: %q", i, stream.URLs[i])
+		}
+	}
+	if stream.Extra["url_mode"] != "mirror" || stream.Extra["cdn_nodes"] != true {
+		t.Fatalf("stream mirror extra = %#v", stream.Extra)
+	}
+}
+
+func TestNormalizeStorageExpandsSmarteduCDNNodes(t *testing.T) {
+	cases := []struct {
+		name  string
+		raw   string
+		hosts []string
+	}{
+		{
+			name: "private cs_path",
+			raw:  "cs_path:${ref-path}/edu_product/esp/assets/private.pdf",
+			hosts: []string{
+				"r1-ndr-private.ykt.cbern.com.cn",
+				"r2-ndr-private.ykt.cbern.com.cn",
+				"r3-ndr-private.ykt.cbern.com.cn",
+			},
+		},
+		{
+			name: "public r1 url",
+			raw:  "https://r1-ndr.ykt.cbern.com.cn/edu_product/esp/assets/public.mp4?x=1",
+			hosts: []string{
+				"r1-ndr.ykt.cbern.com.cn",
+				"r2-ndr.ykt.cbern.com.cn",
+				"r3-ndr.ykt.cbern.com.cn",
+			},
+		},
+		{
+			name: "oversea r2 url",
+			raw:  "https://r2-ndr-oversea.ykt.cbern.com.cn/edu_product/esp/assets/oversea.mp4",
+			hosts: []string{
+				"r1-ndr-oversea.ykt.cbern.com.cn",
+				"r2-ndr-oversea.ykt.cbern.com.cn",
+				"r3-ndr-oversea.ykt.cbern.com.cn",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			urls := normalizeStorageCandidates(tc.raw)
+			if len(urls) != len(tc.hosts) {
+				t.Fatalf("urls = %#v, want %d hosts", urls, len(tc.hosts))
+			}
+			for i, host := range tc.hosts {
+				if !strings.Contains(urls[i], host) {
+					t.Fatalf("url[%d] = %q, want host %s", i, urls[i], host)
+				}
+			}
+		})
 	}
 }

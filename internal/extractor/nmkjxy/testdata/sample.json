@@ -36,7 +36,13 @@
     }
   },
   "GET /api/V310/Courseware/1001": {
-    "data": []
+    "data": [
+      {
+        "coursewareUrl": "https://media.example.com/nmkjxy/lecture.pdf",
+        "coursewareName": "Lecture.pdf",
+        "fileSize": 4096
+      }
+    ]
   },
   "GET /api/Courseware/1001": {
     "data": []

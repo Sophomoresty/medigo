@@ -2,6 +2,7 @@
 package nmkjxy
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -30,6 +31,25 @@ const (
 
 var patterns = []string{`(?:[\w-]+\.)?nmkjxy\.com/`}
 
+var (
+	materialFileExts = map[string]struct{}{
+		"pdf": {}, "ppt": {}, "pptx": {}, "doc": {}, "docx": {}, "xls": {}, "xlsx": {},
+		"zip": {}, "rar": {}, "7z": {}, "jpg": {}, "jpeg": {}, "png": {},
+	}
+	skipMaterialFileExts = map[string]struct{}{
+		"vtt": {}, "srt": {}, "ass": {}, "ssa": {}, "json": {},
+	}
+	materialFileKeys = []string{
+		"contentFilePath", "coursewarePath", "coursewareUrl", "handoutPath", "handoutUrl",
+		"lecturePath", "lectureUrl", "materialPath", "materialUrl", "attachmentPath",
+		"attachmentUrl", "filePath", "fileUrl", "downloadUrl", "path",
+	}
+	materialNameKeys = []string{
+		"contentFileName", "coursewareName", "handoutName", "lectureName", "materialName",
+		"attachmentName", "fileName", "name", "title",
+	}
+)
+
 func init() {
 	extractor.Register(&Nmkjxy{}, extractor.SiteInfo{Name: "Nmkjxy", URL: "nmkjxy.com", NeedAuth: true})
 }
@@ -45,14 +65,16 @@ func (n *Nmkjxy) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 	c := util.NewClient()
 	c.SetCookieJar(opts.Cookies)
 	h := headers(opts.Cookies)
+	downloadH := downloadHeaders(opts.Cookies, h)
 	if err := checkCookie(c, h); err != nil {
 		return nil, err
 	}
 
 	cid := parseCID(rawURL)
 	orderSN := ""
+	var courses []map[string]any
 	if cid == "" {
-		courses := fetchCourseList(c, h)
+		courses = fetchCourseList(c, h)
 		if len(courses) == 0 {
 			return nil, fmt.Errorf("cannot parse nmkjxy courseId/productId from URL and course list is empty")
 		}
@@ -67,13 +89,29 @@ func (n *Nmkjxy) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 	productData := dataMap(product)
 	title := firstText(productData, "prodName", "name", "productName", "title")
 	orderSN = first(orderSN, firstText(productData, "orderSn", "orderSN"))
+	if orderSN == "" {
+		if courses == nil {
+			courses = fetchCourseList(c, h)
+		}
+		for _, course := range courses {
+			if firstText(course, "course_id", "productId", "prodId", "courseId", "id") != cid {
+				continue
+			}
+			orderSN = firstText(course, "order_sn", "orderSn", "orderSN")
+			if title == "" {
+				title = firstText(course, "title", "prodName", "productName", "courseName", "name")
+			}
+			break
+		}
+	}
 	if title == "" {
 		title = "nmkjxy_" + cid
 	}
 
+	var videoListErr error
 	listJSON, err := requestJSON(c, fmt.Sprintf(video_list_url, cid), h)
 	if err != nil {
-		return nil, fmt.Errorf("nmkjxy video list: %w", err)
+		videoListErr = fmt.Errorf("nmkjxy video list: %w", err)
 	}
 	items := iterItems(listJSON)
 	if len(items) == 0 && orderSN != "" {
@@ -95,45 +133,33 @@ func (n *Nmkjxy) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 		play, _ := requestJSON(c, fmt.Sprintf(video_play_url, cid, url.QueryEscape(first(vi.VideoSN, vi.VideoID))), h)
 		playData := dataMap(play)
 		picked := pickPlayInfo(playData["playInfoList"], qualityFromOpts(opts))
-		playURL := absURL(firstText(picked, "playURL", "playUrl", "url"))
+		playURL := normalizePlayURL(firstText(picked, "playURL", "playUrl", "url"))
 		if playURL == "" {
 			continue
 		}
-		stream := extractor.Stream{Quality: firstText(picked, "definition"), URLs: []string{playURL}, Format: pickFormat(playURL), Size: sizeBytes(picked["size"]), Headers: map[string]string{"Referer": referer, "Origin": origin}}
+		format := pickFormat(playURL)
+		stream := extractor.Stream{Quality: firstText(picked, "definition"), URLs: []string{playURL}, Format: format, Size: sizeBytes(picked["size"]), NeedMerge: format == "m3u8", Headers: cloneHeaders(downloadH)}
 		if stream.Quality == "" {
 			stream.Quality = "best"
 		}
-		entries = append(entries, &extractor.MediaInfo{Site: "nmkjxy", Title: vi.Name, Streams: map[string]extractor.Stream{"best": stream}, Subtitles: subtitles(item, playData), Extra: map[string]any{"video_id": vi.VideoID, "video_sn": vi.VideoSN, "video_num": cid, "video_nid": vi.VideoNID}})
+		extra := map[string]any{"video_id": vi.VideoID, "video_sn": vi.VideoSN, "video_num": cid, "video_nid": vi.VideoNID}
+		if vi.VideoSN != "" {
+			extra["mark_played_url"] = video_played_url
+			extra["mark_played_payload"] = map[string]string{"videoNum": cid, "videoSn": vi.VideoSN, "videoNId": vi.VideoNID}
+		}
+		entries = append(entries, &extractor.MediaInfo{Site: "nmkjxy", Title: vi.Name, Streams: map[string]extractor.Stream{"best": stream}, Subtitles: subtitles(item, playData), Extra: extra})
 	}
-	courseware := fetchCourseware(c, h, cid)
-	cwSeen := map[string]bool{}
-	for i, cw := range courseware {
-		fileURL := cw["file_url"]
-		if fileURL == "" || cwSeen[fileURL] {
+	courseware := fetchCourseware(c, h, cid, downloadH)
+	for _, cw := range courseware {
+		if cw == nil || len(cw.Streams) == 0 && len(cw.Entries) == 0 {
 			continue
 		}
-		cwSeen[fileURL] = true
-		name := cw["file_name"]
-		if name == "" {
-			name = fileNameFromURL(fileURL)
-		}
-		if name == "" {
-			name = fmt.Sprintf("courseware_%02d", i+1)
-		}
-		format := ext(fileURL, "bin")
-		entries = append(entries, &extractor.MediaInfo{
-			Site:  "nmkjxy",
-			Title: sanitize(name),
-			Streams: map[string]extractor.Stream{"file": {
-				Quality: "source",
-				URLs:    []string{fileURL},
-				Format:  format,
-				Headers: map[string]string{"Referer": referer, "Origin": origin},
-			}},
-			Extra: map[string]any{"kind": "file"},
-		})
+		entries = append(entries, cw)
 	}
 	if len(entries) == 0 {
+		if videoListErr != nil {
+			return nil, videoListErr
+		}
 		return nil, fmt.Errorf("nmkjxy: no playable videos or courseware files found")
 	}
 	return &extractor.MediaInfo{Site: "nmkjxy", Title: sanitize(title), Entries: entries}, nil
@@ -209,7 +235,7 @@ func pickPlayInfo(v any, quality string) map[string]any {
 	var playable []map[string]any
 	for _, e := range list {
 		if m, ok := e.(map[string]any); ok {
-			if firstText(m, "playURL") != "" {
+			if firstText(m, "playURL", "playUrl", "url") != "" {
 				playable = append(playable, m)
 				defs[strings.ToUpper(firstText(m, "definition"))] = m
 			}
@@ -301,7 +327,7 @@ func iterCourseItems(v any) []map[string]any {
 				walk(e)
 			}
 		case map[string]any:
-			if firstText(t, "prodId", "productId", "courseId", "id") != "" && firstText(t, "prodName", "productName", "courseName", "title", "name") != "" {
+			if firstText(t, "prodId", "productId", "courseId", "id") != "" && firstText(t, "prodName", "productName", "courseName", "title", "name", "orderSn", "orderSN") != "" {
 				out = append(out, t)
 			}
 			for _, k := range []string{"data", "rows", "list", "items", "result"} {
@@ -315,26 +341,24 @@ func iterCourseItems(v any) []map[string]any {
 	return out
 }
 
-func fetchCourseware(c *util.Client, h map[string]string, cid string) []map[string]string {
-	var out []map[string]string
+func fetchCourseware(c *util.Client, h map[string]string, cid string, downloadH map[string]string) []*extractor.MediaInfo {
 	for _, api := range []string{fmt.Sprintf(courseware_url, cid), fmt.Sprintf(legacy_courseware_url, cid)} {
 		v, err := requestJSON(c, api, h)
 		if err != nil {
 			continue
 		}
-		for _, m := range iterFiles(dataAny(v)) {
-			fileURL := firstText(m, "contentFilePath", "coursewarePath", "coursewareUrl", "handoutPath", "handoutUrl", "lecturePath", "lectureUrl", "materialPath", "materialUrl", "attachmentPath", "attachmentUrl", "filePath", "fileUrl", "downloadUrl", "path", "url")
-			if fileURL == "" {
-				continue
+		data := dataAny(v)
+		if strings.Contains(api, "/V310/Courseware/") {
+			if out := parseCoursewareGroupsWithHeaders(data, 1, downloadH); len(out) > 0 {
+				return out
 			}
-			out = append(out, map[string]string{"file_url": absURL(fileURL), "file_name": firstText(m, "contentFileName", "coursewareName", "handoutName", "lectureName", "materialName", "attachmentName", "fileName", "name", "title")})
-		}
-		if len(out) > 0 {
-			break
+		} else if out := parseLegacyCoursewareFilesWithHeaders(data, 1, downloadH); len(out) > 0 {
+			return out
 		}
 	}
-	return out
+	return nil
 }
+
 func dataAny(v any) any {
 	if m, ok := v.(map[string]any); ok {
 		if d, ok := m["data"]; ok {
@@ -343,29 +367,357 @@ func dataAny(v any) any {
 	}
 	return v
 }
-func iterFiles(v any) []map[string]any {
+
+func parseCoursewareGroups(groups any, categoryIndex int) []*extractor.MediaInfo {
+	return parseCoursewareGroupsWithHeaders(groups, categoryIndex, nil)
+}
+
+func parseCoursewareGroupsWithHeaders(groups any, categoryIndex int, downloadH map[string]string) []*extractor.MediaInfo {
+	items := asList(groups)
+	if len(items) == 0 {
+		if m, ok := groups.(map[string]any); ok && isMaterialSource(m) {
+			items = []any{m}
+		}
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	var out []*extractor.MediaInfo
+	seen := map[string]bool{}
+	for i, item := range items {
+		group, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		out = append(out, parseCoursewareGroup(group, categoryIndex, i+1, seen, downloadH)...)
+	}
+	return out
+}
+
+func parseCoursewareGroup(group map[string]any, categoryIndex, fallbackIndex int, seen map[string]bool, downloadH map[string]string) []*extractor.MediaInfo {
+	var out []*extractor.MediaInfo
+	files := asList(group["files"])
+	if len(files) == 0 {
+		return parseMaterialFiles(group, formatIndexPrefix(strconv.Itoa(categoryIndex), strconv.Itoa(fallbackIndex), "1"), seen, downloadH)
+	}
+	for fileIndex, item := range files {
+		source, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		entry := parseFileInfoWithHeaders(source, formatIndexPrefix(strconv.Itoa(categoryIndex), strconv.Itoa(fallbackIndex), strconv.Itoa(fileIndex+1)), downloadH)
+		if entry == nil {
+			out = append(out, parseMaterialFiles(source, formatIndexPrefix(strconv.Itoa(categoryIndex), strconv.Itoa(fallbackIndex), strconv.Itoa(fileIndex+1)), seen, downloadH)...)
+			continue
+		}
+		if url := firstStreamURL(entry); url != "" {
+			if seen[url] {
+				continue
+			}
+			seen[url] = true
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func parseMaterialFiles(source any, indexPrefix string, seen map[string]bool, downloadH map[string]string) []*extractor.MediaInfo {
+	if seen == nil {
+		seen = map[string]bool{}
+	}
+	var out []*extractor.MediaInfo
+	for _, candidate := range iterMaterialFileSources(source) {
+		entry := parseFileInfoWithHeaders(candidate, indexPrefix, downloadH)
+		if entry == nil {
+			continue
+		}
+		if url := firstStreamURL(entry); url != "" {
+			if seen[url] {
+				continue
+			}
+			seen[url] = true
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func parseLegacyCoursewareFiles(files any, categoryIndex int) []*extractor.MediaInfo {
+	return parseLegacyCoursewareFilesWithHeaders(files, categoryIndex, nil)
+}
+
+func parseLegacyCoursewareFilesWithHeaders(files any, categoryIndex int, downloadH map[string]string) []*extractor.MediaInfo {
+	items := asList(files)
+	if len(items) == 0 {
+		if m, ok := files.(map[string]any); ok && isMaterialSource(m) {
+			items = []any{m}
+		}
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	grouped := map[string][]map[string]any{}
+	order := make([]string, 0, len(items))
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		chapter := firstText(m, "chapterSn", "chapterNum", "chapterIndex")
+		if chapter == "" {
+			chapter = "1"
+		}
+		if _, ok := grouped[chapter]; !ok {
+			order = append(order, chapter)
+		}
+		grouped[chapter] = append(grouped[chapter], m)
+	}
+
+	var out []*extractor.MediaInfo
+	seen := map[string]bool{}
+	for _, chapter := range order {
+		for fileIndex, item := range grouped[chapter] {
+			entry := parseFileInfoWithHeaders(item, formatIndexPrefix(strconv.Itoa(categoryIndex), chapter, strconv.Itoa(fileIndex+1)), downloadH)
+			if entry == nil {
+				out = append(out, parseMaterialFiles(item, formatIndexPrefix(strconv.Itoa(categoryIndex), chapter, strconv.Itoa(fileIndex+1)), seen, downloadH)...)
+				continue
+			}
+			if url := firstStreamURL(entry); url != "" {
+				if seen[url] {
+					continue
+				}
+				seen[url] = true
+			}
+			out = append(out, entry)
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+
+	for i, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		entry := parseFileInfoWithHeaders(m, formatIndexPrefix(strconv.Itoa(categoryIndex), strconv.Itoa(i+1)), downloadH)
+		if entry == nil {
+			out = append(out, parseMaterialFiles(m, formatIndexPrefix(strconv.Itoa(categoryIndex), strconv.Itoa(i+1)), seen, downloadH)...)
+			continue
+		}
+		if url := firstStreamURL(entry); url != "" {
+			if seen[url] {
+				continue
+			}
+			seen[url] = true
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func iterMaterialFileSources(source any) []map[string]any {
 	var out []map[string]any
 	var walk func(any)
-	walk = func(x any) {
-		switch t := x.(type) {
+	walk = func(v any) {
+		switch t := v.(type) {
 		case []any:
-			for _, e := range t {
-				walk(e)
+			for _, item := range t {
+				walk(item)
 			}
 		case map[string]any:
-			if firstText(t, "fileUrl", "downloadUrl", "path", "url", "coursewareUrl", "contentFilePath") != "" {
+			for _, key := range materialFileKeys {
+				raw := strings.TrimSpace(fmt.Sprint(t[key]))
+				if raw == "" || raw == "<nil>" {
+					continue
+				}
+				out = append(out, map[string]any{
+					"fileUrl":  raw,
+					"fileName": firstText(t, materialNameKeys...),
+					"format":   fileExtFromURL(raw),
+					"size":     firstAny(t, "fileSize", "size"),
+				})
+			}
+			if isMaterialSource(t) {
 				out = append(out, t)
 			}
-			for _, y := range t {
-				switch y.(type) {
+			for _, value := range t {
+				switch value.(type) {
 				case []any, map[string]any:
-					walk(y)
+					walk(value)
 				}
 			}
 		}
 	}
-	walk(v)
+	walk(source)
 	return out
+}
+
+func isMaterialSource(source map[string]any) bool {
+	if source == nil {
+		return false
+	}
+	for _, key := range materialFileKeys {
+		if strings.TrimSpace(fmt.Sprint(source[key])) != "" && fmt.Sprint(source[key]) != "<nil>" {
+			return true
+		}
+	}
+	for _, key := range materialNameKeys {
+		if strings.TrimSpace(fmt.Sprint(source[key])) != "" && fmt.Sprint(source[key]) != "<nil>" {
+			return true
+		}
+	}
+	return false
+}
+
+func parseFileInfo(source map[string]any, indexPrefix string) *extractor.MediaInfo {
+	return parseFileInfoWithHeaders(source, indexPrefix, nil)
+}
+
+func parseFileInfoWithHeaders(source map[string]any, indexPrefix string, downloadH map[string]string) *extractor.MediaInfo {
+	if source == nil {
+		return nil
+	}
+	rawURL := firstAnyText(source, "url", "fileUrl", "downloadUrl", "path", "filePath", "contentFilePath", "coursewarePath", "coursewareUrl", "handoutPath", "handoutUrl", "lecturePath", "lectureUrl", "materialPath", "materialUrl", "attachmentPath", "attachmentUrl")
+	if rawURL == "" {
+		return nil
+	}
+	fileURL := absURL(rawURL)
+	name := firstAnyText(source, "fileName", "contentFileName", "coursewareName", "handoutName", "lectureName", "materialName", "attachmentName", "name", "title")
+	format := firstAnyText(source, "format", "ext")
+	if format == "" {
+		format = fileExtFromURL(fileURL)
+	}
+	if format == "" && name != "" {
+		format = fileExtFromURL(name)
+	}
+	format = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(format)), ".")
+	if format == "" {
+		format = "bin"
+	}
+	if !isMaterialFileExt(format) {
+		return nil
+	}
+	if name == "" {
+		name = fileNameFromURL(fileURL)
+	}
+	if name == "" {
+		name = "课件"
+	}
+	name = stripFileExt(name, format)
+	name = sanitize(fmt.Sprintf("(%s)--%s", indexPrefix, name))
+	st := extractor.Stream{
+		Quality: "source",
+		URLs:    []string{fileURL},
+		Format:  format,
+		Size:    sizeBytes(firstAny(source, "fileSize", "size")),
+		Headers: cloneHeaders(downloadH),
+	}
+	if len(st.Headers) == 0 {
+		st.Headers = map[string]string{"Referer": referer, "Origin": origin}
+	}
+	return &extractor.MediaInfo{Site: "nmkjxy", Title: name, Streams: map[string]extractor.Stream{"file": st}, Extra: map[string]any{"kind": "file", "file_fmt": format, "file_url": fileURL}}
+}
+
+func asList(v any) []any {
+	switch t := v.(type) {
+	case nil:
+		return nil
+	case []any:
+		return t
+	case map[string]any:
+		for _, key := range []string{"groups", "files", "list", "items", "rows", "result", "data"} {
+			if vv, ok := t[key]; ok {
+				if list, ok := vv.([]any); ok {
+					return list
+				}
+				if m, ok := vv.(map[string]any); ok {
+					if list := asList(m); len(list) > 0 {
+						return list
+					}
+					if isMaterialSource(m) {
+						return []any{m}
+					}
+				}
+			}
+		}
+		if isMaterialSource(t) {
+			return []any{t}
+		}
+	}
+	return nil
+}
+
+func firstAny(m map[string]any, keys ...string) any {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			if s := strings.TrimSpace(fmt.Sprint(v)); s != "" && s != "<nil>" {
+				return v
+			}
+		}
+	}
+	return nil
+}
+
+func firstAnyText(m map[string]any, keys ...string) string {
+	if v := firstAny(m, keys...); v != nil {
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
+	return ""
+}
+
+func firstStreamURL(info *extractor.MediaInfo) string {
+	if info == nil {
+		return ""
+	}
+	for _, st := range info.Streams {
+		if len(st.URLs) > 0 && strings.TrimSpace(st.URLs[0]) != "" {
+			return strings.TrimSpace(st.URLs[0])
+		}
+	}
+	return ""
+}
+
+func stripFileExt(name, fileFmt string) string {
+	name = strings.TrimSpace(name)
+	fileFmt = strings.Trim(strings.ToLower(strings.TrimSpace(fileFmt)), ".")
+	if name == "" || fileFmt == "" {
+		return name
+	}
+	if strings.HasSuffix(strings.ToLower(name), "."+fileFmt) {
+		return strings.TrimSpace(name[:len(name)-len(fileFmt)-1])
+	}
+	return name
+}
+
+func isMaterialFileExt(fileFmt string) bool {
+	fileFmt = strings.Trim(strings.ToLower(strings.TrimSpace(fileFmt)), ".")
+	if fileFmt == "" {
+		return false
+	}
+	if _, skip := skipMaterialFileExts[fileFmt]; skip {
+		return false
+	}
+	_, ok := materialFileExts[fileFmt]
+	return ok
+}
+
+func fileExtFromURL(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ""
+	}
+	return strings.Trim(strings.ToLower(ext(rawURL, "")), ".")
+}
+
+func formatIndexPrefix(values ...string) string {
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			out = append(out, s)
+		}
+	}
+	return strings.Join(out, ".")
 }
 
 func subtitles(raw, play map[string]any) []extractor.Subtitle {
@@ -374,8 +726,15 @@ func subtitles(raw, play map[string]any) []extractor.Subtitle {
 	for _, m := range []map[string]any{raw, play} {
 		for _, k := range []string{"subtitlePath", "subtitleUrl", "subTitlePath", "subTitleUrl", "srtPath", "vttPath"} {
 			if u := absURL(firstText(m, k)); u != "" && !seen[u] {
+				format := fileExtFromURL(u)
+				if format == "" {
+					format = "srt"
+				}
+				if format != "srt" && format != "vtt" {
+					continue
+				}
 				seen[u] = true
-				out = append(out, extractor.Subtitle{Language: "字幕", URL: u, Format: ext(u, "srt")})
+				out = append(out, extractor.Subtitle{Language: "字幕", URL: u, Format: format})
 			}
 		}
 	}
@@ -389,21 +748,78 @@ func headers(j http.CookieJar) map[string]string {
 	}
 	return h
 }
+
+func downloadHeaders(j http.CookieJar, base map[string]string) map[string]string {
+	h := cloneHeaders(base)
+	if h == nil {
+		h = map[string]string{}
+	}
+	if h["Referer"] == "" {
+		h["Referer"] = referer
+	}
+	if h["Origin"] == "" {
+		h["Origin"] = origin
+	}
+	if cookie := cookieHeader(j); cookie != "" {
+		h["Cookie"] = cookie
+	}
+	return h
+}
+
+func cookieHeader(j http.CookieJar) string {
+	if j == nil {
+		return ""
+	}
+	seen := map[string]bool{}
+	parts := []string{}
+	for _, host := range []string{"https://www.nmkjxy.com/", "https://api.nmkjxy.com/", "https://apim.ningmengyun.com/"} {
+		u, _ := url.Parse(host)
+		for _, ck := range j.Cookies(u) {
+			if ck == nil || ck.Name == "" || ck.Value == "" || seen[ck.Name] {
+				continue
+			}
+			seen[ck.Name] = true
+			parts = append(parts, ck.Name+"="+ck.Value)
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+func cloneHeaders(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if strings.TrimSpace(v) != "" {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 func tokenFromJar(j http.CookieJar) string {
 	if j == nil {
 		return ""
 	}
+	fallback := ""
 	for _, host := range []string{"https://www.nmkjxy.com/", "https://api.nmkjxy.com/", "https://apim.ningmengyun.com/"} {
 		u, _ := url.Parse(host)
 		for _, ck := range j.Cookies(u) {
 			if t := parseToken(ck.Name, ck.Value); t != "" {
-				return t
+				if isTokenCookieName(ck.Name) {
+					return t
+				}
+				if fallback == "" {
+					fallback = t
+				}
 			}
 		}
 	}
-	return ""
+	return fallback
 }
 func parseToken(name, val string) string {
+	tokenCookie := isTokenCookieName(name)
 	v := strings.TrimSpace(val)
 	if strings.EqualFold(name, "Authorization") && strings.HasPrefix(strings.ToLower(v), "bearer ") {
 		return strings.TrimSpace(v[7:])
@@ -423,10 +839,26 @@ func parseToken(name, val string) string {
 	if strings.HasPrefix(strings.ToLower(v), "bearer ") {
 		v = strings.TrimSpace(v[7:])
 	}
-	if strings.Contains(v, "=") && !strings.EqualFold(name, "token") && !strings.EqualFold(name, "Token") {
+	if strings.Contains(v, "=") && !tokenCookie {
+		return ""
+	}
+	if !tokenCookie {
 		return ""
 	}
 	return strings.TrimSpace(v)
+}
+
+func isTokenCookieName(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || strings.Contains(name, "csrf") || strings.Contains(name, "xsrf") {
+		return false
+	}
+	switch name {
+	case "authorization", "access_token", "accesstoken", "access-token":
+		return true
+	default:
+		return strings.Contains(name, "token")
+	}
 }
 
 var cidRe = regexp.MustCompile(`(?i)[?&](?:courseId|course_id|productId|prodId|cid|id)=([0-9]+)|/(?:course|product|detail|video)/([0-9]+)`)
@@ -502,6 +934,19 @@ func absURL(s string) string {
 	r, _ := url.Parse(s)
 	return b.ResolveReference(r).String()
 }
+
+func normalizePlayURL(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	low := strings.ToLower(s)
+	if strings.HasPrefix(low, "#extm3u") || strings.Contains(low, "\n#extm3u") {
+		return "data:application/vnd.apple.mpegurl;base64," + base64.StdEncoding.EncodeToString([]byte(s))
+	}
+	return absURL(s)
+}
+
 func ext(u, def string) string {
 	p := strings.ToLower(strings.Split(strings.Split(u, "?")[0], "#")[0])
 	if i := strings.LastIndex(p, "."); i >= 0 && i+1 < len(p) {
@@ -511,18 +956,66 @@ func ext(u, def string) string {
 }
 func sizeBytes(v any) int64 {
 	switch x := v.(type) {
+	case json.Number:
+		if n, err := x.Int64(); err == nil {
+			return n
+		}
+		if f, err := x.Float64(); err == nil {
+			return int64(f)
+		}
 	case float64:
+		return int64(x)
+	case float32:
+		return int64(x)
+	case int:
 		return int64(x)
 	case int64:
 		return x
+	case int32:
+		return int64(x)
+	case int16:
+		return int64(x)
+	case int8:
+		return int64(x)
+	case uint:
+		return int64(x)
+	case uint64:
+		return int64(x)
+	case uint32:
+		return int64(x)
+	case uint16:
+		return int64(x)
+	case uint8:
+		return int64(x)
 	case string:
-		f, _ := strconv.ParseFloat(strings.TrimSpace(x), 64)
-		return int64(f)
+		s := strings.TrimSpace(strings.ToUpper(x))
+		if s == "" {
+			return 0
+		}
+		unitMul := float64(1)
+		switch {
+		case strings.HasSuffix(s, "KB") || strings.HasSuffix(s, "K"):
+			unitMul = 1024
+			s = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(s, "KB"), "K"))
+		case strings.HasSuffix(s, "MB") || strings.HasSuffix(s, "M"):
+			unitMul = 1024 * 1024
+			s = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(s, "MB"), "M"))
+		case strings.HasSuffix(s, "GB") || strings.HasSuffix(s, "G"):
+			unitMul = 1024 * 1024 * 1024
+			s = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(s, "GB"), "G"))
+		case strings.HasSuffix(s, "TB") || strings.HasSuffix(s, "T"):
+			unitMul = 1024 * 1024 * 1024 * 1024
+			s = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(s, "TB"), "T"))
+		}
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return int64(f * unitMul)
+		}
 	}
 	return 0
 }
 func pickFormat(u string) string {
-	if strings.Contains(strings.ToLower(u), ".m3u8") {
+	low := strings.ToLower(strings.TrimSpace(u))
+	if strings.Contains(low, ".m3u8") || strings.HasPrefix(low, "#extm3u") || strings.HasPrefix(low, "data:application/vnd.apple.mpegurl") || strings.Contains(low, "mpegurl") {
 		return "m3u8"
 	}
 	return "mp4"

@@ -57,6 +57,12 @@ func TestPlasoAlgorithms(t *testing.T) {
 	if got := plasoPlayerURLEncrypt("abc"); got != "d54bdf" {
 		t.Fatalf("plasoPlayerURLEncrypt = %q, want d54bdf", got)
 	}
+	if got := buildPlasoEventAudioURL("audio/lesson.mp3"); got != "https://file.plaso.cn/teaching/audio/lesson.mp3" {
+		t.Fatalf("buildPlasoEventAudioURL = %q, want file.plaso.cn teaching URL", got)
+	}
+	if got := buildPlasoEventAudioURL("//file.plaso.cn/teaching/audio/lesson.mp3"); got != "https://file.plaso.cn/teaching/audio/lesson.mp3" {
+		t.Fatalf("buildPlasoEventAudioURL protocol-relative = %q", got)
+	}
 	u, q := pickPlayURL(map[string]any{"playUrls": map[string]any{"hd": map[string]any{"url": "https://cdn.example/hd.m3u8"}, "ld": "https://cdn.example/ld.m3u8"}}, "hd")
 	if u != "https://cdn.example/hd.m3u8" || q != "hd" {
 		t.Fatalf("pickPlayURL = (%q,%q)", u, q)
@@ -69,6 +75,49 @@ func TestPlasoAlgorithms(t *testing.T) {
 	qv := pu.Query()
 	if pu.Host != "bucket.oss-cn-shanghai.aliyuncs.com" || qv.Get("x-oss-signature-version") != "OSS4-HMAC-SHA256" || qv.Get("x-oss-security-token") != "tok" || len(qv.Get("x-oss-signature")) != 64 {
 		t.Fatalf("unexpected v4 signed URL: %s", signed)
+	}
+}
+
+func TestPlistAudioPathUsesFilePlasoTeachingHost(t *testing.T) {
+	sess := &plasoSession{headers: map[string]string{}, quality: "hd"}
+	root := map[string]any{
+		"layers": []any{
+			map[string]any{"recordUrl": "video/1.mp4"},
+			map[string]any{"audioPath": "audio/lesson.mp3"},
+		},
+	}
+	src := sess.pickPlistMedia(root, "https://example.test/info.plist", fileItem{Location: "LC001", LocationPath: "liveclass/plaso", Type: "video"})
+	if src.URL != "https://filecdn.plaso.com/liveclass/plaso/LC001/video/1.mp4" {
+		t.Fatalf("picked video URL = %q", src.URL)
+	}
+	if src.AudioURL != "https://file.plaso.cn/teaching/audio/lesson.mp3" {
+		t.Fatalf("audio URL = %q, want file.plaso.cn teaching URL", src.AudioURL)
+	}
+}
+
+func TestPlasoResourceDirectAndPPTPlayerStaticEntry(t *testing.T) {
+	if !isPlasoDirectResourceHost("ppt-player.plaso.com") || !isPlasoDirectResourceHost("ppt-player-wwwr.plaso.com") || !isPlasoDirectResourceHost("file.plaso.cn") {
+		t.Fatalf("direct resource host matcher missed plaso resource hosts")
+	}
+	ext := &Plaso{}
+	direct, err := ext.Extract("https://file.plaso.cn/teaching/audio/lesson.mp3", nil)
+	if err != nil {
+		t.Fatalf("direct file.plaso.cn resource returned error: %v", err)
+	}
+	if st := direct.Streams["best"]; st.URLs[0] != "https://file.plaso.cn/teaching/audio/lesson.mp3" || st.Format != "mp3" || direct.Extra["source_type"] != "direct_resource" {
+		t.Fatalf("direct resource stream mismatch: %#v / %#v", st, direct.Extra)
+	}
+
+	static, err := ext.Extract("https://ppt-player-wwwr.plaso.com/static/ispring/Scripts/player.js?static=1&v=202304150933", nil)
+	if err != nil {
+		t.Fatalf("ppt-player static resource returned error: %v", err)
+	}
+	st := static.Streams["best"]
+	if st.URLs[0] != "https://ppt-player-wwwr.plaso.com/static/ispring/Scripts/player.js?static=1&v=202304150933" || st.Format != "js" {
+		t.Fatalf("static stream mismatch: %#v", st)
+	}
+	if static.Extra["source_type"] != "native_static_entry" || static.Extra["static_host"] != "ppt-player-wwwr.plaso.com" || static.Extra["static_path"] != "static/ispring/Scripts/player.js" {
+		t.Fatalf("static metadata mismatch: %#v", static.Extra)
 	}
 }
 
