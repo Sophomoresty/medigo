@@ -2,9 +2,36 @@ package gaotu
 
 import (
 	"encoding/base64"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+func TestPatternsMatchGaotuAPIDomains(t *testing.T) {
+	compiled := make([]*regexp.Regexp, 0, len((&Gaotu{}).Patterns()))
+	for _, pattern := range (&Gaotu{}).Patterns() {
+		compiled = append(compiled, regexp.MustCompile(pattern))
+	}
+	for _, rawURL := range []string{
+		"https://api.gaotu.cn/studyPlatform/v1/unit/clazz/list?clazzNumber=G001",
+		"https://interactive.gaotu.cn/live/api/studyCenter/v1/user/pc/clazz/detail?clazzNumber=G001",
+		"https://api.gaotu100.com/live/zplan/login/videoLive?clazzLessonNumber=T001",
+		"https://interactive.gaotu100.com/live/api/live/zplan/playbackWeb?clazzNumber=T001",
+		"https://api.gtgz.cn/web/order/pay/shape/list",
+		"https://interactive.gtgz.cn/live/api/pan/listDir",
+		"https://api.naiyouxuexi.com/studyPlatform/v1/unit/clazz/list?clazzNumber=S001",
+		"https://interactive.naiyouxuexi.com/live/api/pan/file",
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			for _, re := range compiled {
+				if re.MatchString(rawURL) {
+					return
+				}
+			}
+			t.Fatalf("gaotu pattern did not match %q", rawURL)
+		})
+	}
+}
 
 func TestEndpointsForBrandDomains(t *testing.T) {
 	tests := []struct {
@@ -118,6 +145,87 @@ func TestEndpointsForBrandDomains(t *testing.T) {
 			}
 			if !strings.Contains(got.userAgent, tt.userAgent) {
 				t.Fatalf("userAgent = %q, want to contain %q", got.userAgent, tt.userAgent)
+			}
+		})
+	}
+}
+
+func TestEndpointsForAPIDomains(t *testing.T) {
+	tests := []struct {
+		name            string
+		rawURL          string
+		apiHost         string
+		interactiveHost string
+		pClient         string
+	}{
+		{
+			name:            "api_gaotu",
+			rawURL:          "https://api.gaotu.cn/studyPlatform/v1/unit/clazz/list?clazzNumber=G001",
+			apiHost:         "api.gaotu.cn",
+			interactiveHost: "interactive.gaotu.cn",
+			pClient:         "1",
+		},
+		{
+			name:            "interactive_gaotu",
+			rawURL:          "https://interactive.gaotu.cn/live/api/studyCenter/v1/user/pc/clazz/detail?clazzNumber=G001",
+			apiHost:         "api.gaotu.cn",
+			interactiveHost: "interactive.gaotu.cn",
+			pClient:         "1",
+		},
+		{
+			name:            "api_gaotu100",
+			rawURL:          "https://api.gaotu100.com/live/zplan/login/videoLive?clazzLessonNumber=T001",
+			apiHost:         "api.gaotu100.com",
+			interactiveHost: "interactive.gaotu100.com",
+			pClient:         "2",
+		},
+		{
+			name:            "interactive_gaotu100",
+			rawURL:          "https://interactive.gaotu100.com/live/api/live/zplan/playbackWeb?clazzNumber=T001",
+			apiHost:         "api.gaotu100.com",
+			interactiveHost: "interactive.gaotu100.com",
+			pClient:         "2",
+		},
+		{
+			name:            "api_gtgz",
+			rawURL:          "https://api.gtgz.cn/web/order/pay/shape/list",
+			apiHost:         "api.gtgz.cn",
+			interactiveHost: "interactive.gtgz.cn",
+			pClient:         "8",
+		},
+		{
+			name:            "interactive_gtgz",
+			rawURL:          "https://interactive.gtgz.cn/live/api/pan/listDir",
+			apiHost:         "api.gtgz.cn",
+			interactiveHost: "interactive.gtgz.cn",
+			pClient:         "8",
+		},
+		{
+			name:            "api_naiyouxuexi",
+			rawURL:          "https://api.naiyouxuexi.com/studyPlatform/v1/unit/clazz/list?clazzNumber=S001",
+			apiHost:         "api.naiyouxuexi.com",
+			interactiveHost: "interactive.naiyouxuexi.com",
+			pClient:         "18",
+		},
+		{
+			name:            "interactive_naiyouxuexi",
+			rawURL:          "https://interactive.naiyouxuexi.com/live/api/pan/file",
+			apiHost:         "api.naiyouxuexi.com",
+			interactiveHost: "interactive.naiyouxuexi.com",
+			pClient:         "18",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := endpointsFor(tt.rawURL)
+			if got.apiHost != tt.apiHost {
+				t.Fatalf("apiHost = %q, want %q", got.apiHost, tt.apiHost)
+			}
+			if got.interactiveHost != tt.interactiveHost {
+				t.Fatalf("interactiveHost = %q, want %q", got.interactiveHost, tt.interactiveHost)
+			}
+			if got.pClient != tt.pClient {
+				t.Fatalf("pClient = %q, want %q", got.pClient, tt.pClient)
 			}
 		})
 	}

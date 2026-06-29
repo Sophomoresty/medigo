@@ -707,7 +707,7 @@ func referer(c xetCtx) string {
 		return "https://" + c.domain
 	}
 	if c.appID != "" {
-		return fmt.Sprintf(courseURL, c.appID, firstNonEmpty(c.xetDomain, xetDomainDefault), firstNonEmpty(c.typ, "video"), firstNonEmpty(c.cid, ""))
+		return fmt.Sprintf("https://%s%s", c.appID, firstNonEmpty(c.xetDomain, xetDomainDefault))
 	}
 	return refererURL
 }
@@ -740,11 +740,11 @@ func isMediaURL(u string) bool {
 	}
 	return (strings.HasPrefix(u, "http") || strings.HasPrefix(u, "//")) && !regexp.MustCompile(`(?i)\.(?:jpg|jpeg|png|gif|webp)(?:[?#]|$)`).MatchString(u)
 }
-func media(title, u string, extra map[string]any) *extractor.MediaInfo {
+func media(title, u string, extra map[string]any, ref ...string) *extractor.MediaInfo {
 	if title == "" {
 		title = "xiaoetech_video"
 	}
-	stream := extractor.Stream{Quality: "source", URLs: []string{u}, Format: formatOf(u), Headers: map[string]string{"Referer": refererURL}}
+	stream := extractor.Stream{Quality: "source", URLs: []string{u}, Format: formatOf(u), Headers: map[string]string{"Referer": firstNonEmpty(append(ref, refererURL)...)}}
 	if strings.Contains(strings.ToLower(stream.Format), "m3u8") {
 		stream.NeedMerge = true
 	}

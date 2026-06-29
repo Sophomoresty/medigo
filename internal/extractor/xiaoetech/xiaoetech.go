@@ -64,9 +64,9 @@ const (
 	pageSize          = 30
 )
 
-var patterns = []string{`(?:[\w-]+\.)?(?:xiaoe-tech\.com|xiaoeknow\.com|xet\.citv\.cn|xet-pc\.citv\.cn)/`}
-var pageRe = regexp.MustCompile(`(?i)/(?:p/course/([^/]+)/([^/?#]+)|p/t_pc/course_pc_detail/([^/]+)/([^/?#]+)|v\d+/course/alive/([^/?#]+)|v\d+/goods/goods_detail/([^/?#]+))`)
-var appHostRe = regexp.MustCompile(`(?i)^([a-z0-9]+)(\.h5\.(?:xiaoeknow\.com|xiaoecloud\.com|xet\.citv\.cn))$`)
+var patterns = []string{`(?:[\w-]+\.)*(?:xiaoe-tech\.com|xiaoeknow\.com|xiaoecloud\.com|xe-live\.com|xet(?:-pc)?\.citv\.cn)/`}
+var pageRe = regexp.MustCompile(`(?i)/(?:p/course/([^/]+)/([^/?#]+)|p/t_pc/course_pc_detail/([^/]+)/([^/?#]+)|p/t_pc/goods_pc_detail/goods_detail/([^/?#]+)|v\d+/course/([^/]+)/([^/?#]+)|v\d+/goods/goods_detail/([^/?#]+))`)
+var appHostRe = regexp.MustCompile(`(?i)^([a-z0-9_]+)(\.h5(?:\.[a-z0-9-]+)*\.(?:(?:xiaoeknow|xiaoecloud|xe-live)\.com|xet(?:-pc)?\.[a-z0-9.-]+)|(?:\.h5)?\.xet(?:-pc)?\.citv\.cn)$`)
 var httpRe = regexp.MustCompile(`https?:\\?/\\?/[^"'\s\\]+|https?://[^"'\s]+`)
 
 func init() {
@@ -109,8 +109,8 @@ func (x *Xiaoetech) Extract(rawURL string, opts *extractor.ExtractOpts) (*extrac
 	blockedReasons := []string{}
 	seenURL, seenItem := map[string]bool{}, map[string]bool{}
 	var processItem func(xetItem, bool)
-	addEntry := func(it xetItem) bool {
-		u, extra := resolveItem(c, opts.Cookies, ctx.withItem(it), it)
+	addEntry := func(it xetItem, itemCtx xetCtx) bool {
+		u, extra := resolveItem(c, opts.Cookies, itemCtx, it)
 		if reason := val(extra, "blocked_reason"); reason != "" {
 			blockedReasons = append(blockedReasons, reason)
 			return false
@@ -119,7 +119,7 @@ func (x *Xiaoetech) Extract(rawURL string, opts *extractor.ExtractOpts) (*extrac
 			return false
 		}
 		seenURL[u] = true
-		entries = append(entries, media(firstNonEmpty(it.title, ctx.title, it.id), u, extra))
+		entries = append(entries, media(firstNonEmpty(it.title, ctx.title, it.id), u, extra, referer(itemCtx)))
 		return true
 	}
 	processItem = func(it xetItem, topLevel bool) {
@@ -128,14 +128,15 @@ func (x *Xiaoetech) Extract(rawURL string, opts *extractor.ExtractOpts) (*extrac
 			return
 		}
 		seenItem[key] = true
-		if expanded := expandContainerItem(c, opts.Cookies, ctx.withItem(it), it); len(expanded) > 0 {
+		itemCtx := ctx.withItem(it)
+		if expanded := expandContainerItem(c, opts.Cookies, itemCtx, it); len(expanded) > 0 {
 			for _, child := range expanded {
 				processItem(child, false)
 			}
 			return
 		}
-		addEntry(it)
-		for _, child := range supplementalItems(c, opts.Cookies, ctx.withItem(it), it) {
+		addEntry(it, itemCtx)
+		for _, child := range supplementalItems(c, opts.Cookies, itemCtx, it) {
 			processItem(child, false)
 		}
 	}
@@ -176,6 +177,10 @@ func (c xetCtx) withItem(it xetItem) xetCtx {
 		p := parseCtx(it.pageURL)
 		if p.appID != "" {
 			c.appID, c.xetDomain, c.pc, c.domain = p.appID, p.xetDomain, p.pc, p.domain
+			c.referer = p.referer
+		} else if p.pc && p.domain != "" {
+			c.domain, c.pc = p.domain, true
+			c.referer = p.referer
 		}
 		if p.typ != "" {
 			c.typ = p.typ
@@ -201,12 +206,15 @@ func parseCtx(raw string) xetCtx {
 	if err != nil {
 		return ctx
 	}
-	h := strings.ToLower(u.Host)
-	if m := appHostRe.FindStringSubmatch(h); m != nil {
-		ctx.appID, ctx.xetDomain = m[1], m[2]
+	hostname := strings.ToLower(u.Hostname())
+	if hostname == "" {
+		hostname = strings.ToLower(u.Host)
+	}
+	if m := appHostRe.FindStringSubmatch(hostname); m != nil {
+		ctx.appID, ctx.xetDomain = strings.ToLower(m[1]), normalizeXETDomain(m[2])
 	} else {
 		ctx.domain = u.Host
-		ctx.pc = strings.Contains(h, "xiaoe-tech.com")
+		ctx.pc = strings.Contains(hostname, "xiaoe-tech.com")
 	}
 	if m := pageRe.FindStringSubmatch(u.Path); m != nil {
 		if m[1] != "" {
@@ -214,25 +222,72 @@ func parseCtx(raw string) xetCtx {
 		} else if m[3] != "" {
 			ctx.typ, ctx.cid, ctx.pc = m[3], m[4], true
 		} else if m[5] != "" {
-			ctx.typ, ctx.cid = "live", m[5]
+			ctx.cid, ctx.pc = m[5], true
+		} else if m[6] != "" {
+			ctx.typ, ctx.cid = m[6], m[7]
 		} else {
-			ctx.typ, ctx.cid = "video", m[6]
+			ctx.cid = m[8]
 		}
 	}
 	if ctx.typ == "" && strings.Contains(strings.ToLower(u.Path), "/clock/") {
 		ctx.typ = "clock"
 	}
 	q := u.Query()
-	ctx.appID = firstNonEmpty(q.Get("app_id"), q.Get("appId"), ctx.appID)
+	ctx.appID = strings.ToLower(firstNonEmpty(q.Get("app_id"), q.Get("appId"), ctx.appID))
 	ctx.userID = firstNonEmpty(q.Get("user_id"), q.Get("uid"))
-	ctx.cid = firstNonEmpty(ctx.cid, q.Get("activity_id"), q.Get("resource_id"), q.Get("product_id"), q.Get("course_id"), q.Get("id"))
+	ctx.cid = firstNonEmpty(ctx.cid, q.Get("activity_id"), q.Get("resource_id"), q.Get("product_id"), q.Get("pro_id"), q.Get("course_id"), q.Get("id"))
+	queryType := normType(firstNonEmpty(q.Get("resource_type"), q.Get("resourceType"), q.Get("course_type"), q.Get("courseType")))
 	ctx.typ = normType(ctx.typ)
+	if queryType != "" && (ctx.typ == "" || ctx.typ == "content" || ctx.typ == "goods" || ctx.typ == "detail") {
+		ctx.typ = queryType
+	}
+	if ctx.typ == "" {
+		ctx.typ = typeFromResourceID(ctx.cid)
+	}
 	if ctx.typ == "clock" && raw != "" {
 		ctx.referer = raw
 	} else {
 		ctx.referer = referer(ctx)
 	}
 	return ctx
+}
+
+func normalizeXETDomain(domain string) string {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return xetDomainDefault
+	}
+	domain = strings.Replace(domain, ".xet-pc.", ".xet.", 1)
+	if domain == ".xet.citv.cn" {
+		return ".h5.xet.citv.cn"
+	}
+	return domain
+}
+
+func typeFromResourceID(id string) string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	switch {
+	case strings.HasPrefix(id, "v_"):
+		return "video"
+	case strings.HasPrefix(id, "a_"):
+		return "audio"
+	case strings.HasPrefix(id, "l_"):
+		return "live"
+	case strings.HasPrefix(id, "i_"), strings.HasPrefix(id, "d_"):
+		return "text"
+	case strings.HasPrefix(id, "e_"):
+		return "book"
+	case strings.HasPrefix(id, "p_"):
+		return "column"
+	case strings.HasPrefix(id, "ac_"):
+		return "clock"
+	case strings.HasPrefix(id, "term_"):
+		return "train"
+	case strings.HasPrefix(id, "course_"):
+		return "ecourse"
+	default:
+		return ""
+	}
 }
 
 func enrichFromHTML(c *util.Client, jar http.CookieJar, ctx xetCtx, raw string) xetCtx {

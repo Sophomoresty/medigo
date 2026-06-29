@@ -13,6 +13,7 @@
 | Gaotu_Course.py:43-45 pan/file/price APIs | `sourceURLFormat`, `fileURLFormat`, `priceURLFormat` | ✓ |
 | Gaotu_Base.py:29 and brand subclasses `order_url` | `orderURLFormat` + `endpointsFor()` selects `api.gaotu.cn` / `api.gaotu100.com` / `api.gtgz.cn` / `api.naiyouxuexi.com` | ✓ |
 | Brand `User-Agent` strings | `gaotuUserAgent()` + `endpointsFor()` app/version mapping | ✓ |
+| Python API/interactive hostnames | `patterns` matches `api.*` / `interactive.*` hosts for `gaotu.cn`, `gaotu100.com`, `gtgz.cn`, `naiyouxuexi.com`; `endpointsFor()` maps them back to the same brand endpoints | ✓ |
 
 ## HTTP 调用
 

@@ -26,7 +26,7 @@ const (
 	live_play_url   = "https://api.wenzaizhibo.com/web/playback/getPlaybackInfoV4?room_id=%s&partner_id=%s&user_number=%s&expires_in=%s&user_role=%s&timestamp=%s&is_encrypted=%s&sign=%s&playlist=%s"
 )
 
-var patterns = []string{`(?:[\w-]+\.)?(?:gaotu\.cn|gaotu100\.com|gtgz\.cn|naiyouxuexi\.com|wenzaizhibo\.com)/`}
+var patterns = []string{`(?i)(?:^|https?://|[/?#&=])(?:[\w-]+\.)?(?:gaotu\.cn|gaotu100\.com|gtgz\.cn|naiyouxuexi\.com|wenzaizhibo\.com)(?:[/:?#&=]|$)`}
 
 func init() {
 	extractor.Register(&Gaotu{}, extractor.SiteInfo{Name: "Gaotu", URL: "gaotu.cn", NeedAuth: true})

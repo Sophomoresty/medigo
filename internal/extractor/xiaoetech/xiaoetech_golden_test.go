@@ -108,3 +108,122 @@ func TestExtractMock(t *testing.T) {
 	media, err := (&Xiaoetech{}).Extract("https://demo.xiaoeknow.com/p/course/video/xe-course-1", &extractor.ExtractOpts{Cookies: jar})
 	assertGoldenOutcome(t, media, err)
 }
+
+func TestMatchH5MerchantSubdomain(t *testing.T) {
+	ext, err := extractor.Match("https://app1wdgsmih6712.h5.xiaoeknow.com/p/course/video/v_615fa7a5e4b0dfaf7faa90f6")
+	if err != nil {
+		t.Fatalf("Match() error = %v", err)
+	}
+	if _, ok := ext.(*Xiaoetech); !ok {
+		t.Fatalf("Match() = %T, want *Xiaoetech", ext)
+	}
+}
+
+func TestParseCtxH5MerchantHosts(t *testing.T) {
+	tests := []struct {
+		name      string
+		raw       string
+		appID     string
+		xetDomain string
+		cid       string
+		typ       string
+		referer   string
+		pc        bool
+	}{
+		{
+			name:      "h5 xiaoeknow v4 live",
+			raw:       "https://appabc123.h5.xiaoeknow.com/v4/course/alive/l_68a2d7cae4b0694ca101d0a8?app_id=appabc123&type=2&resource_type=4&resource_id=l_68a2d7cae4b0694ca101d0a8&pro_id=course_1",
+			appID:     "appabc123",
+			xetDomain: ".h5.xiaoeknow.com",
+			cid:       "l_68a2d7cae4b0694ca101d0a8",
+			typ:       "live",
+			referer:   "https://appabc123.h5.xiaoeknow.com",
+		},
+		{
+			name:      "bare xet citv live host maps to h5 api domain",
+			raw:       "https://appfdksyi2e1655.xet.citv.cn/v3/course/alive/l_68a2d7cae4b0694ca101d0a8?app_id=appfdksyi2e1655&alive_mode=0&pro_id=&type=2",
+			appID:     "appfdksyi2e1655",
+			xetDomain: ".h5.xet.citv.cn",
+			cid:       "l_68a2d7cae4b0694ca101d0a8",
+			typ:       "live",
+			referer:   "https://appfdksyi2e1655.h5.xet.citv.cn",
+		},
+		{
+			name:      "goods detail infers resource type from id",
+			raw:       "https://appabc123.h5.xiaoeknow.com/v4/goods/goods_detail/p_649aac0ee4b0b2d1c4297a5f?app_id=appabc123",
+			appID:     "appabc123",
+			xetDomain: ".h5.xiaoeknow.com",
+			cid:       "p_649aac0ee4b0b2d1c4297a5f",
+			typ:       "column",
+			referer:   "https://appabc123.h5.xiaoeknow.com",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseCtx(tt.raw)
+			if got.appID != tt.appID || got.xetDomain != tt.xetDomain || got.cid != tt.cid || got.typ != tt.typ || got.referer != tt.referer || got.pc != tt.pc {
+				t.Fatalf("parseCtx() = %#v, want appID=%q xetDomain=%q cid=%q typ=%q referer=%q pc=%v", got, tt.appID, tt.xetDomain, tt.cid, tt.typ, tt.referer, tt.pc)
+			}
+		})
+	}
+}
+
+func TestExtractH5MerchantSubdomainUsesMerchantAPI(t *testing.T) {
+	const rawURL = "https://appabc123.h5.xiaoeknow.com/v4/course/video/v_123456?app_id=appabc123&resource_id=v_123456&resource_type=3"
+	const merchantReferer = "https://appabc123.h5.xiaoeknow.com"
+	var sawVideoAPI bool
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "video.detail_info.get"):
+			if r.Host != "appabc123.h5.xiaoeknow.com" {
+				t.Errorf("video API host = %q, want appabc123.h5.xiaoeknow.com", r.Host)
+			}
+			if got := r.Header.Get("Referer"); got != merchantReferer {
+				t.Errorf("video API Referer = %q, want %q", got, merchantReferer)
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("ParseForm() error = %v", err)
+			}
+			if got := r.Form.Get("bizData[resource_id]"); got != "v_123456" {
+				t.Errorf("bizData[resource_id] = %q, want v_123456", got)
+			}
+			sawVideoAPI = true
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_, _ = w.Write([]byte(`{"code":0,"data":{"video_m3u8_url":"https://media.example.com/xet/v_123456.m3u8"}}`))
+		case r.URL.Path == "/v4/course/video/v_123456":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(`<!doctype html><title>Merchant Lesson</title><script>window.USERID="u1";</script>`))
+		default:
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_, _ = w.Write([]byte(`{"code":0,"data":{"list":[]}}`))
+		}
+	})
+	httpSrv := httptest.NewServer(handler)
+	defer httpSrv.Close()
+	httpsSrv := httptest.NewTLSServer(handler)
+	defer httpsSrv.Close()
+	installMockTransport(t, httpSrv.URL, httpsSrv.URL)
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("new cookie jar: %v", err)
+	}
+	media, err := (&Xiaoetech{}).Extract(rawURL, &extractor.ExtractOpts{Cookies: jar})
+	if err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
+	if !sawVideoAPI {
+		t.Fatalf("video detail API was not called")
+	}
+	if len(media.Entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(media.Entries))
+	}
+	stream := media.Entries[0].Streams["default"]
+	if got := stream.URLs[0]; got != "https://media.example.com/xet/v_123456.m3u8" {
+		t.Fatalf("stream URL = %q", got)
+	}
+	if got := stream.Headers["Referer"]; got != merchantReferer {
+		t.Fatalf("stream Referer = %q, want %q", got, merchantReferer)
+	}
+}

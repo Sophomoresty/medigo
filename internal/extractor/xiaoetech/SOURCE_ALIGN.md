@@ -19,6 +19,15 @@
 | Xiaoetech_Course.py:52 `text_url` | xiaoetech.go:37 `textURL` | ✓ |
 | Xiaoetech_Course.py:58 `file_url` | xiaoetech.go:38 `fileURL` | ✓ |
 
+## URL / 域名匹配
+
+| Python 参考 | Go 实现 | 一致? |
+|---|---|---|
+| Mooc_Config.py:24-26 `XIAOETECH_H5_HOST_PATTERN` 支持 `{app_id}.h5[.*].xiaoeknow.com`, `xiaoecloud.com`, `xe-live.com`, `xet.*` | xiaoetech.go `appHostRe` + `normalizeXETDomain` | ✓ |
+| Mooc_Config.py:240 `Xiaoetech_App` 与 241-249 各资源 regex 支持多级小鹅通域名 | xiaoetech.go `patterns` 使用 `(?:[\w-]+\.)*...` 通配商户子域 | ✓ |
+| Xiaoetech_Live.py:105/116 等 H5 `referer = https://{app_id}{xet_domain}` | helpers.go `referer` H5 分支返回商户根域, `media` 透传条目 referer | ✓ |
+| Xiaoetech_App.py:281-288, Xiaoetech_Course.py:736-744 支持 `/vN/course/alive`, `/vN/course/*`, `/vN/goods/goods_detail` | xiaoetech.go `pageRe`, `parseCtx`, `typeFromResourceID` | ✓ |
+
 ## HTTP 调用
 
 | 源码方法 (line) | Go 函数 | method | 一致? |
