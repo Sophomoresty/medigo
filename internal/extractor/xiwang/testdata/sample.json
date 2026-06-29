@@ -1,6 +1,6 @@
 {
-  "stat": 0,
-  "status": 0,
+  "stat": 1,
+  "status": 1,
   "data": {
     "learningCourses": [
       {
@@ -19,7 +19,8 @@
         "configs": {
           "appId": "demo",
           "liveTypeId": "7",
-          "videoFile": "file1"
+          "videoFile": "file1",
+          "videoUrl": "https://media.example.com/xiwang/lesson-1.m3u8"
         },
         "planInfo": {
           "liveTypeId": "7"
@@ -28,5 +29,12 @@
     ],
     "addr": "https://media.example.com/xiwang/lesson-1.m3u8"
   },
-  "addr": "https://media.example.com/xiwang/lesson-1.m3u8"
+  "addr": "https://media.example.com/xiwang/lesson-1.m3u8",
+  "content": {
+    "addrs": [
+      {
+        "addr": "https://media.example.com/xiwang/lesson-1.m3u8"
+      }
+    ]
+  }
 }

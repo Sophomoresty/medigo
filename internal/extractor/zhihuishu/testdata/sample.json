@@ -1,22 +1,26 @@
 {
   "result": {
     "uuid": "uuid-1",
+    "src": "https://subtitle.example.com/zhihuishu/lesson-1.srt",
     "lines": [
       {"lineID": 2},
       {"lineID": 1}
     ]
   },
-  "data": [
-    {
-      "name": "Chapter 1",
-      "lessons": [
-        {
-          "name": "Lesson 1",
-          "videoId": 12345,
-          "smallLessons": []
-        }
-      ]
-    }
-  ],
-  "body": "<html><title>Test Course</title><script>var termId = 100;\nvar recruitId = 999;</script></html>"
+  "data": {
+    "recruitId": 999,
+    "videoChapterDtos": [
+      {
+        "name": "Chapter 1",
+        "videoLessons": [
+          {
+            "name": "Lesson 1",
+            "videoId": 12345,
+            "videoSmallLessons": []
+          }
+        ]
+      }
+    ]
+  },
+  "body": "<html><title>Test Course</title><script>var termId = 100;\nvar recruitId = 999;</script><div class=\"online-sections-wrap\"><div class=\"sections-wrap\"><div class=\"section-item\" videoid=\"12345\"><div class=\"online-section-title-text-wrap\" title=\"Lesson 1\"></div></div></div></div></html>"
 }

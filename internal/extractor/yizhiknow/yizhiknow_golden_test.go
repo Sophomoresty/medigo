@@ -88,6 +88,34 @@ func assertGoldenOutcome(t *testing.T, media *extractor.MediaInfo, err error) {
 	}
 }
 
+func goldenFirstPlayableURL(mi *extractor.MediaInfo) string {
+	if mi == nil {
+		return ""
+	}
+	for _, stream := range mi.Streams {
+		for _, u := range stream.URLs {
+			if strings.TrimSpace(u) != "" {
+				return strings.TrimSpace(u)
+			}
+		}
+	}
+	for _, entry := range mi.Entries {
+		if u := goldenFirstPlayableURL(entry); u != "" {
+			return u
+		}
+	}
+	return ""
+}
+
+func setGoldenCookie(t *testing.T, jar http.CookieJar, rawURL, name, value string) {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse cookie URL %q: %v", rawURL, err)
+	}
+	jar.SetCookies(u, []*http.Cookie{{Name: name, Value: value}})
+}
+
 func TestExtractMock(t *testing.T) {
 	fixture := loadGoldenFixture(t)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -104,7 +132,16 @@ func TestExtractMock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new cookie jar: %v", err)
 	}
+	setGoldenCookie(t, jar, "https://user.yizhiknow.com/", "Access-Token", "mock-token")
+	setGoldenCookie(t, jar, "https://curriculum-api.yizhiknow.com/", "Access-Token", "mock-token")
 
 	media, err := (&Yizhiknow{}).Extract("https://www.yizhiknow.com/course/video/1001?curriculum_id=1001", &extractor.ExtractOpts{Cookies: jar})
 	assertGoldenOutcome(t, media, err)
+	if err != nil {
+		t.Fatalf("Extract returned error against golden fixture: %v", err)
+	}
+	got := goldenFirstPlayableURL(media)
+	if !strings.Contains(got, "https://media.example.com/yizhiknow/lesson-1.mp4") {
+		t.Fatalf("playable URL %q does not contain expected fixture URL", got)
+	}
 }

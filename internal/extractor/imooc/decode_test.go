@@ -51,6 +51,13 @@ func TestDecryptInfoTooShort(t *testing.T) {
 	}
 }
 
+func TestDecryptInfoTooFewRunesDoesNotPanic(t *testing.T) {
+	_, err := decryptInfo("你好")
+	if err == nil {
+		t.Fatal("expected error for too-few rune data")
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

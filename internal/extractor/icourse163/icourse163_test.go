@@ -1,6 +1,9 @@
 package icourse163
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseKaoyanURL(t *testing.T) {
 	tests := []struct {
@@ -77,5 +80,23 @@ func TestParseColumnLessonsAndUnits(t *testing.T) {
 	}
 	if len(units) != 2 || units[0].lessonUnitID != "456" || units[0].contentType != "8" || units[1].lessonUnitID != "789" {
 		t.Fatalf("units = %#v", units)
+	}
+}
+
+func TestTextbookSectionEntryReturnsDownloadableHTMLStream(t *testing.T) {
+	entry := textbookSectionEntry("1001", textbookLeaf{title: "原标题", externalID: "ext1"}, map[string]any{"Title": "目录标题"}, `<h1>正文</h1><script>alert(1)</script><img src="//img.example/a.png">`, 2)
+	if entry.Title != "目录标题" {
+		t.Fatalf("Title = %q, want 目录标题", entry.Title)
+	}
+	stream, ok := entry.Streams["document"]
+	if !ok {
+		t.Fatalf("document stream missing: %#v", entry.Streams)
+	}
+	if stream.Format != "html" || len(stream.URLs) != 1 || !strings.HasPrefix(stream.URLs[0], "data:text/html;charset=utf-8,") {
+		t.Fatalf("stream = %#v, want html data URL", stream)
+	}
+	content, _ := entry.Extra["content"].(string)
+	if strings.Contains(content, "<script") || !strings.Contains(content, `src="https://img.example/a.png"`) {
+		t.Fatalf("normalized content = %q", content)
 	}
 }

@@ -88,6 +88,25 @@ func assertGoldenOutcome(t *testing.T, media *extractor.MediaInfo, err error) {
 	}
 }
 
+func goldenFirstPlayableURL(mi *extractor.MediaInfo) string {
+	if mi == nil {
+		return ""
+	}
+	for _, stream := range mi.Streams {
+		for _, u := range stream.URLs {
+			if strings.TrimSpace(u) != "" {
+				return strings.TrimSpace(u)
+			}
+		}
+	}
+	for _, entry := range mi.Entries {
+		if u := goldenFirstPlayableURL(entry); u != "" {
+			return u
+		}
+	}
+	return ""
+}
+
 func TestExtractMock(t *testing.T) {
 	fixture := loadGoldenFixture(t)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -107,4 +126,11 @@ func TestExtractMock(t *testing.T) {
 
 	media, err := (&Zlketang{}).Extract("https://www.zlketang.com/wxpub/page/zl_course/commodity.html?product_id=1001&course_id=2001", &extractor.ExtractOpts{Cookies: jar})
 	assertGoldenOutcome(t, media, err)
+	if err != nil {
+		t.Fatalf("Extract returned error against golden fixture: %v", err)
+	}
+	got := goldenFirstPlayableURL(media)
+	if !strings.Contains(got, "https://media.example.com/zlketang/lesson-1.m3u8") {
+		t.Fatalf("playable URL %q does not contain expected fixture URL", got)
+	}
 }

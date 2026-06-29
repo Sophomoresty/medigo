@@ -1,5 +1,5 @@
 {
-  "code": 0,
+  "code": 1,
   "body": {
     "courses": [
       {
@@ -27,9 +27,20 @@
     "records": [
       {
         "id": "1001",
-        "name": "Test Course"
+        "name": "Test Course",
+        "classScheduleId": "2001",
+        "lectureType": "video"
       }
     ],
-    "url": "https://media.example.com/xsteach/lesson-1.mp4"
+    "url": "https://media.example.com/xsteach/lesson-1.mp4",
+    "periods": [
+      {
+        "id": "3001",
+        "name": "Lesson 1",
+        "lectureType": "video",
+        "videoUrl": "https://media.example.com/xsteach/lesson-1.mp4",
+        "isHasVideo": true
+      }
+    ]
   }
 }

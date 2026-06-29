@@ -2,9 +2,15 @@ package gaotu
 
 import (
 	"encoding/base64"
+	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/Sophomoresty/mediago/internal/util"
 )
 
 func TestPatternsMatchGaotuAPIDomains(t *testing.T) {
@@ -271,12 +277,157 @@ func TestGaotuOrderPriceFromPayload(t *testing.T) {
 func TestGaotuLessonRequestPayloads(t *testing.T) {
 	id := ids{Live: "L001", SID: "session-token"}
 	video := gaotuVideoRequestPayload(id)
-	if video["liveId"] != "L001" || video["sid"] != "session-token" || video["roleType"] != 0 {
+	if video["liveId"] != "L001" || video["sid"] != "session-token" || video["sessionId"] != 0 || video["roleType"] != 0 {
 		t.Fatalf("video payload mismatch: %#v", video)
 	}
 	live := gaotuLiveRequestPayload(id)
-	if live["liveId"] != "L001" || live["sessionId"] != "session-token" || live["roleType"] != 0 {
+	if live["liveId"] != "L001" || live["sessionId"] != 0 || live["roleType"] != 0 {
 		t.Fatalf("live payload mismatch: %#v", live)
+	}
+}
+
+func TestGaotuAuthFromCookiesAddsCookieSidAndUIDHeaders(t *testing.T) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New: %v", err)
+	}
+	u, _ := url.Parse("https://www.gaotu.cn/")
+	jar.SetCookies(u, []*http.Cookie{
+		{Name: "__user_token__", Value: "session-token"},
+		{Name: "Uid", Value: "12345"},
+		{Name: "other", Value: "value"},
+	})
+	headers := map[string]string{}
+	sid := gaotuAuthFromCookies(jar, endpointsFor("https://www.gaotu.cn/course?clazzNumber=C001"), headers)
+	if sid != "session-token" {
+		t.Fatalf("sid = %q, want session-token", sid)
+	}
+	if headers["Sid"] != "session-token" || headers["Uid"] != "12345" {
+		t.Fatalf("auth headers mismatch: %#v", headers)
+	}
+	if got := headers["Cookie"]; !strings.Contains(got, "__user_token__=session-token") || !strings.Contains(got, "Uid=12345") {
+		t.Fatalf("Cookie header = %q, want source cookies", got)
+	}
+}
+
+func TestDirectGaotuPCURLDoesNotRequireCookies(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"play_info":{"source":{"cdn_list":[{"url":"https://cdn.example.com/direct.mp4"}]}}}}`))
+	}))
+	defer srv.Close()
+
+	rawURL := srv.URL + "/web/video/getPlayUrl?vid=V001&partner_id=p&user_number=u&expires_in=e&user_role=3&timestamp=t&is_encrypted=0&sign=s"
+	info, err := (&Gaotu{}).Extract(rawURL, nil)
+	if err != nil {
+		t.Fatalf("Extract direct pcUrl: %v", err)
+	}
+	if len(paths) != 1 || !strings.HasSuffix(paths[0], "getPlayUrl") {
+		t.Fatalf("request paths = %#v, want one getPlayUrl call", paths)
+	}
+	if got := info.Streams["best"].URLs[0]; got != "https://cdn.example.com/direct.mp4" {
+		t.Fatalf("media url = %q", got)
+	}
+}
+
+func TestGaotuCourseListRequestPayloadPages(t *testing.T) {
+	got := gaotuCourseListRequestPayload(3)
+	modulePage, ok := got["modulePage"].(map[string]any)
+	if !ok {
+		t.Fatalf("modulePage missing: %#v", got)
+	}
+	if modulePage["pageNum"] != 3 {
+		t.Fatalf("pageNum = %#v, want 3", modulePage["pageNum"])
+	}
+	if _, ok := got["searchTypeList"].([]any); !ok {
+		t.Fatalf("searchTypeList missing: %#v", got)
+	}
+}
+
+func TestPlaybackURLVariantsMirrorPythonFallbacks(t *testing.T) {
+	raw := "https://api.wenzaizhibo.com/web/playback/getPlaybackInfoV4?room_id=R001&playlist=a%2Fb&sign=s"
+	variants := playbackURLVariants(raw)
+	wantSubstrings := []string{
+		"/web/playback/getPlaybackInfoV4?",
+		"/web/playback/getPlaybackInfoV3?",
+		"/web/playback/getPlaybackInfo?",
+		"end_type=4",
+	}
+	for _, want := range wantSubstrings {
+		found := false
+		for _, got := range variants {
+			if strings.Contains(got, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("variants %#v do not contain %q", variants, want)
+		}
+	}
+	if len(variants) != len(dedupeStrings(variants)) {
+		t.Fatalf("variants contain duplicates: %#v", variants)
+	}
+	legacy := variants[len(variants)-1]
+	parsed, err := url.Parse(legacy)
+	if err != nil {
+		t.Fatalf("parse legacy variant: %v", err)
+	}
+	if parsed.Query().Get("end_type") != "4" {
+		t.Fatalf("legacy end_type = %q, want 4: %s", parsed.Query().Get("end_type"), legacy)
+	}
+}
+
+func TestDecodeWenzaiPCURLFallsBackToPlaybackV3(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "getPlaybackInfoV3") {
+			_, _ = w.Write([]byte(`{"data":{"play_info":{"source":{"cdn_list":[{"url":"https://cdn.example.com/v3.m3u8"}]}}}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer srv.Close()
+
+	got := decodeWenzaiPCURL(util.NewClient(), nil, srv.URL+"/web/playback/getPlaybackInfoV4?room_id=R001&playlist=x&sign=s")
+	if got != "https://cdn.example.com/v3.m3u8" {
+		t.Fatalf("media url = %q, want V3 fallback m3u8; paths=%#v", got, paths)
+	}
+	if len(paths) < 2 || !strings.HasSuffix(paths[0], "getPlaybackInfoV4") || !strings.HasSuffix(paths[1], "getPlaybackInfoV3") {
+		t.Fatalf("fallback request order mismatch: %#v", paths)
+	}
+}
+
+func TestPostFormJSONUsesFormEncoding(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if got := r.Header.Get("Content-Type"); !strings.Contains(got, "application/x-www-form-urlencoded") {
+			t.Fatalf("Content-Type = %q, want form encoding", got)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		if r.PostForm.Get("liveId") != "L001" || r.PostForm.Get("sessionId") != "sid" || r.PostForm.Get("roleType") != "0" {
+			t.Fatalf("form payload mismatch: %#v", r.PostForm)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	payload, err := postFormJSON(util.NewClient(), srv.URL, map[string]any{"liveId": "L001", "sessionId": "sid", "roleType": 0}, nil)
+	if err != nil {
+		t.Fatalf("postFormJSON: %v", err)
+	}
+	got, _ := payload.(map[string]any)
+	if got["ok"] != true {
+		t.Fatalf("payload = %#v, want ok=true", payload)
 	}
 }
 

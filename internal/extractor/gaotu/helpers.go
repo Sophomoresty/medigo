@@ -27,12 +27,41 @@ func parseIDs(raw string) ids {
 	return out
 }
 
+func directGaotuPCURL(raw string) string {
+	raw = normalizeURL(raw)
+	low := strings.ToLower(raw)
+	if isWenzaiPlayURL(low) {
+		return raw
+	}
+	values := queryValues(raw)
+	for _, key := range []string{"pcUrl", "pc_url", "playUrl", "play_url", "url"} {
+		if candidate := normalizeURL(values.Get(key)); candidate != "" && isWenzaiPlayURL(strings.ToLower(candidate)) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func directGaotuTitle(raw string) string {
+	values := queryValues(raw)
+	return util.SanitizeFilename(firstNonEmpty(values.Get("title"), values.Get("name"), values.Get("room_id"), values.Get("vid"), "gaotu_direct"))
+}
+
+func isWenzaiPlayURL(low string) bool {
+	return strings.Contains(low, "/web/video/getplayurl") ||
+		strings.Contains(low, "/web/playback/getplaybackinfo")
+}
+
 func gaotuAuthFromCookies(jar http.CookieJar, endpoints gaotuEndpoints, headers map[string]string) string {
-	sid := gaotuCookieValue(jar, gaotuCookieHosts(endpoints), "__user_token__", "sid", "Sid", "sessionId", "SessionId")
+	hosts := gaotuCookieHosts(endpoints)
+	if cookie := gaotuCookieHeader(jar, hosts); cookie != "" {
+		headers["Cookie"] = cookie
+	}
+	sid := gaotuCookieValue(jar, hosts, "__user_token__", "sid", "Sid", "sessionId", "SessionId")
 	if sid != "" {
 		headers["Sid"] = sid
 	}
-	if uid := gaotuCookieValue(jar, gaotuCookieHosts(endpoints), "Uid", "uid", "userId", "userid"); uid != "" {
+	if uid := gaotuCookieValue(jar, hosts, "Uid", "uid", "userId", "userid"); uid != "" {
 		headers["Uid"] = uid
 	}
 	return sid
@@ -240,6 +269,20 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func dedupeStrings(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
 func gaotuCookieValue(jar http.CookieJar, hosts []string, names ...string) string {
 	if jar == nil || len(hosts) == 0 || len(names) == 0 {
 		return ""
@@ -259,6 +302,41 @@ func gaotuCookieValue(jar http.CookieJar, hosts []string, names ...string) strin
 		}
 	}
 	return ""
+}
+
+func gaotuCookieHeader(jar http.CookieJar, hosts []string) string {
+	if jar == nil || len(hosts) == 0 {
+		return ""
+	}
+	type cookieKV struct {
+		name  string
+		value string
+	}
+	seen := map[string]bool{}
+	var cookies []cookieKV
+	for _, host := range hosts {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			continue
+		}
+		for _, ck := range jar.Cookies(&url.URL{Scheme: "https", Host: host, Path: "/"}) {
+			name := strings.TrimSpace(ck.Name)
+			value := strings.TrimSpace(ck.Value)
+			if name == "" || value == "" || seen[strings.ToLower(name)] {
+				continue
+			}
+			seen[strings.ToLower(name)] = true
+			cookies = append(cookies, cookieKV{name: name, value: value})
+		}
+	}
+	if len(cookies) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(cookies))
+	for _, cookie := range cookies {
+		parts = append(parts, cookie.name+"="+cookie.value)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func gaotuCookieHosts(endpoints gaotuEndpoints) []string {

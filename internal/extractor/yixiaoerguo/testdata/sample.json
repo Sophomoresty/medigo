@@ -3,6 +3,11 @@
     "course_info": {
       "title": "Test Course"
     },
+    "qx": {
+      "app": {
+        "token": "mock-qx-token"
+      }
+    },
     "chapters": [
       {
         "section_id": "s1",

@@ -27,6 +27,9 @@ func decryptInfo(data string) ([]byte, error) {
 	}
 
 	runes := []rune(data)
+	if len(runes) < 5 {
+		return nil, fmt.Errorf("imooc decode: data too short (%d runes)", len(runes))
+	}
 
 	// Step 1: compute position offsets from the last 4 chars (reversed order).
 	// The positions are computed ONCE from the original tail, but the data

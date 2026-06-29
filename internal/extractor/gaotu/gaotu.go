@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
 	"regexp"
 	"strings"
 
@@ -75,16 +74,7 @@ type lessonNode struct {
 }
 
 func (g *Gaotu) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.MediaInfo, error) {
-	if opts == nil || opts.Cookies == nil {
-		return nil, fmt.Errorf("gaotu requires login cookies")
-	}
-	id := parseIDs(rawURL)
-	if id.Clazz == "" && id.Live == "" && id.Room == "" {
-		return nil, fmt.Errorf("cannot parse gaotu clazz/live id from URL: %s", rawURL)
-	}
-
 	c := util.NewClient()
-	c.SetCookieJar(opts.Cookies)
 	endpoints := endpointsFor(rawURL)
 	headers := map[string]string{
 		"Accept":       "application/json, text/plain, */*",
@@ -93,7 +83,27 @@ func (g *Gaotu) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.
 		"Content-Type": "application/json;charset=UTF-8",
 		"User-Agent":   endpoints.userAgent,
 	}
-	if sid := gaotuAuthFromCookies(opts.Cookies, endpoints, headers); sid != "" && id.SID == "" {
+	sid := ""
+	if opts != nil && opts.Cookies != nil {
+		c.SetCookieJar(opts.Cookies)
+		sid = gaotuAuthFromCookies(opts.Cookies, endpoints, headers)
+	}
+
+	if direct := directGaotuPCURL(rawURL); direct != "" {
+		if media := firstNonEmpty(findMediaURL(direct), decodePcURL(c, headers, direct)); media != "" {
+			return mediaInfo(directGaotuTitle(rawURL), media, headers), nil
+		}
+		return nil, fmt.Errorf("gaotu: no playable media in direct pcUrl: %s", rawURL)
+	}
+
+	if opts == nil || opts.Cookies == nil {
+		return nil, fmt.Errorf("gaotu requires login cookies")
+	}
+	id := parseIDs(rawURL)
+	if id.Clazz == "" && id.Live == "" && id.Room == "" {
+		return nil, fmt.Errorf("cannot parse gaotu clazz/live id from URL: %s", rawURL)
+	}
+	if sid != "" && id.SID == "" {
 		id.SID = sid
 	}
 
@@ -143,8 +153,13 @@ func resolveCourse(c *util.Client, headers map[string]string, endpoints gaotuEnd
 
 	nodes := collectLessons(payload)
 	if len(nodes) == 0 {
-		// Source also opens course_url while selecting purchased classes; keep that API path covered.
-		if listPayload, err := postJSON(c, endpoints.courseURL(), map[string]any{"searchTypeList": []any{}, "modulePage": map[string]any{"pageNum": 1}}, headers); err == nil {
+		// Python _get_course_list() checks pages 1..9 while selecting purchased
+		// classes; keep that API path and pagination covered as a fallback.
+		for page := 1; page < 10 && len(nodes) == 0; page++ {
+			listPayload, err := postJSON(c, endpoints.courseURL(), gaotuCourseListRequestPayload(page), headers)
+			if err != nil {
+				continue
+			}
 			if title == id.Clazz {
 				title = firstNonEmpty(pickTitle(listPayload), title)
 			}
@@ -181,14 +196,14 @@ func resolveLesson(c *util.Client, headers map[string]string, endpoints gaotuEnd
 				payloads = append(payloads, p)
 			}
 		case "0", "2":
-			if p, err := postJSON(c, endpoints.liveURL(), gaotuLiveRequestPayload(id), headers); err == nil {
+			if p, err := postFormJSON(c, endpoints.liveURL(), gaotuLiveRequestPayload(id), headers); err == nil {
 				payloads = append(payloads, p)
 			}
 		default:
 			if p, err := postJSON(c, endpoints.videoURL(), gaotuVideoRequestPayload(id), headers); err == nil {
 				payloads = append(payloads, p)
 			}
-			if p, err := postJSON(c, endpoints.liveURL(), gaotuLiveRequestPayload(id), headers); err == nil {
+			if p, err := postFormJSON(c, endpoints.liveURL(), gaotuLiveRequestPayload(id), headers); err == nil {
 				payloads = append(payloads, p)
 			}
 		}
@@ -206,11 +221,11 @@ func resolveLesson(c *util.Client, headers map[string]string, endpoints gaotuEnd
 }
 
 func gaotuVideoRequestPayload(id ids) map[string]any {
-	return map[string]any{"liveId": id.Live, "sid": id.SID, "roleType": 0}
+	return map[string]any{"liveId": id.Live, "sid": id.SID, "sessionId": 0, "roleType": 0}
 }
 
 func gaotuLiveRequestPayload(id ids) map[string]any {
-	return map[string]any{"liveId": id.Live, "sessionId": id.SID, "roleType": 0}
+	return map[string]any{"liveId": id.Live, "sessionId": 0, "roleType": 0}
 }
 
 func mediaFromPayload(c *util.Client, headers map[string]string, payload any) string {
@@ -239,23 +254,25 @@ func decodePcURL(c *util.Client, headers map[string]string, pc string) string {
 	}
 	if values.Get("room_id") != "" {
 		if strings.Contains(strings.ToLower(pc), "getplaybackinfov4") {
-			return getMediaJSON(c, headers, pc)
+			return getFirstMediaJSON(c, headers, playbackURLVariants(pc)...)
 		}
 		if strings.Contains(strings.ToLower(pc), "getplaybackinfo") {
-			u, err := url.Parse(pc)
-			if err == nil {
-				qv := u.Query()
-				if qv.Get("end_type") == "" {
-					qv.Set("end_type", "4")
-					u.RawQuery = qv.Encode()
-				}
-				return getMediaJSON(c, headers, u.String())
-			}
+			return getFirstMediaJSON(c, headers, playbackURLVariants(pc)...)
 		}
 		api := fmt.Sprintf(live_play_url, q(values.Get("room_id")), q(values.Get("partner_id")), q(values.Get("user_number")), q(values.Get("expires_in")), q(values.Get("user_role")), q(values.Get("timestamp")), q(values.Get("is_encrypted")), q(values.Get("sign")), q(values.Get("playlist")))
-		return getMediaJSON(c, headers, api)
+		return getFirstMediaJSON(c, headers, playbackURLVariants(api)...)
 	}
 	return ""
+}
+
+func gaotuCourseListRequestPayload(page int) map[string]any {
+	if page < 1 {
+		page = 1
+	}
+	return map[string]any{
+		"searchTypeList": []any{},
+		"modulePage":     map[string]any{"pageNum": page},
+	}
 }
 
 func getMediaJSON(c *util.Client, headers map[string]string, api string) string {
@@ -264,6 +281,21 @@ func getMediaJSON(c *util.Client, headers map[string]string, api string) string 
 		return ""
 	}
 	return gaotuMediaURLFromBody([]byte(body))
+}
+
+func getFirstMediaJSON(c *util.Client, headers map[string]string, apis ...string) string {
+	seen := map[string]bool{}
+	for _, api := range apis {
+		api = strings.TrimSpace(api)
+		if api == "" || seen[api] {
+			continue
+		}
+		seen[api] = true
+		if media := getMediaJSON(c, headers, api); media != "" {
+			return media
+		}
+	}
+	return ""
 }
 
 func postJSON(c *util.Client, api string, payload map[string]any, headers map[string]string) (any, error) {
@@ -281,6 +313,24 @@ func postJSON(c *util.Client, api string, payload map[string]any, headers map[st
 	}
 	var out any
 	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func postFormJSON(c *util.Client, api string, payload map[string]any, headers map[string]string) (any, error) {
+	form := make(map[string]string, len(payload))
+	for key, value := range payload {
+		form[key] = fmt.Sprint(value)
+	}
+	h := cloneHeaders(headers)
+	h["Content-Type"] = "application/x-www-form-urlencoded"
+	body, err := c.PostForm(api, form, h)
+	if err != nil {
+		return nil, err
+	}
+	var out any
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
 		return nil, err
 	}
 	return out, nil

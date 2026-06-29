@@ -720,6 +720,9 @@ func extractItems(v any) []map[string]any {
 		}
 	}
 	m := asMap(v)
+	if len(m) == 0 {
+		return nil
+	}
 	for _, k := range []string{"data", "list", "options", "children", "courseList", "course_list", "vod_urls"} {
 		if out := extractItems(m[k]); len(out) > 0 {
 			return out

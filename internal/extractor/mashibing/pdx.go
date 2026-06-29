@@ -21,12 +21,12 @@ const (
 
 var (
 	// polyv_pdx_secret from source line 43 (base64-decoded to 34 bytes, use first 32 for AES-256)
-	polyvPDXSecret = b64DecodeOrPanic("OWtjN9xcDcc2cwXKxECpRgKw7piD4RwCdfOUlyNHFdSV0gHi=")
+	polyvPDXSecret, polyvPDXSecretErr = decodePolyvPDXKey("OWtjN9xcDcc2cwXKxECpRgKw7piD4RwCdfOUlyNHFdSV0gHi=")
 	// polyv_pdx_iv_bytes from source line 44-59
 	polyvPDXIV = []byte{13, 22, 8, 12, 7, 6, 13, 1, 50, 11, 12, 8, 5, 16, 4, 1}
 )
 
-func b64DecodeOrPanic(s string) []byte {
+func decodePolyvPDXKey(s string) ([]byte, error) {
 	// Try standard first, then URL-safe
 	b, err := base64.StdEncoding.DecodeString(s)
 	if err != nil {
@@ -35,17 +35,20 @@ func b64DecodeOrPanic(s string) []byte {
 			// Try without padding
 			b, err = base64.RawURLEncoding.DecodeString(strings.TrimRight(s, "="))
 			if err != nil {
-				panic(fmt.Sprintf("polyv PDX: cannot decode secret: %v", err))
+				return nil, fmt.Errorf("polyv PDX: cannot decode secret: %w", err)
 			}
 		}
 	}
+	if len(b) == 0 {
+		return nil, fmt.Errorf("polyv PDX: empty secret")
+	}
 	// AES key must be 16, 24, or 32 bytes. Take first 32.
 	if len(b) >= 32 {
-		return b[:32]
+		return b[:32], nil
 	}
 	padded := make([]byte, 32)
 	copy(padded, b)
-	return padded
+	return padded, nil
 }
 
 // decryptPolyvPDXText decrypts a PDX-encrypted response body.
@@ -64,12 +67,15 @@ func decryptPolyvPDXText(ciphertextB64 string) (string, error) {
 		return "", fmt.Errorf("polyv PDX base64 decode: %w", err)
 	}
 
+	if polyvPDXSecretErr != nil {
+		return "", polyvPDXSecretErr
+	}
 	block, err := aes.NewCipher(polyvPDXSecret)
 	if err != nil {
 		return "", fmt.Errorf("polyv PDX AES key: %w", err)
 	}
 
-	if len(ciphertext)%aes.BlockSize != 0 {
+	if len(ciphertext) == 0 || len(ciphertext)%aes.BlockSize != 0 {
 		return "", fmt.Errorf("polyv PDX: ciphertext not block-aligned (%d)", len(ciphertext))
 	}
 
@@ -79,7 +85,7 @@ func decryptPolyvPDXText(ciphertextB64 string) (string, error) {
 
 	// Strip PKCS7 padding
 	pad := int(plaintext[len(plaintext)-1])
-	if pad > 0 && pad <= aes.BlockSize && pad <= len(plaintext) {
+	if validPKCS7Padding(plaintext, pad) {
 		plaintext = plaintext[:len(plaintext)-pad]
 	}
 
@@ -89,20 +95,35 @@ func decryptPolyvPDXText(ciphertextB64 string) (string, error) {
 // decryptPolyvKey decrypts a polyv AES key response.
 // Source _decrypt_polyv_key: AES-CBC decrypt with same secret/IV.
 func decryptPolyvKey(ciphertext []byte) ([]byte, error) {
+	if polyvPDXSecretErr != nil {
+		return nil, polyvPDXSecretErr
+	}
 	block, err := aes.NewCipher(polyvPDXSecret)
 	if err != nil {
 		return nil, err
 	}
-	if len(ciphertext)%aes.BlockSize != 0 {
+	if len(ciphertext) == 0 || len(ciphertext)%aes.BlockSize != 0 {
 		return nil, fmt.Errorf("polyv key: not block-aligned")
 	}
 	plaintext := make([]byte, len(ciphertext))
 	cipher.NewCBCDecrypter(block, polyvPDXIV).CryptBlocks(plaintext, ciphertext)
 	pad := int(plaintext[len(plaintext)-1])
-	if pad > 0 && pad <= aes.BlockSize {
+	if validPKCS7Padding(plaintext, pad) {
 		plaintext = plaintext[:len(plaintext)-pad]
 	}
 	return plaintext, nil
+}
+
+func validPKCS7Padding(data []byte, pad int) bool {
+	if pad <= 0 || pad > aes.BlockSize || pad > len(data) {
+		return false
+	}
+	for _, b := range data[len(data)-pad:] {
+		if int(b) != pad {
+			return false
+		}
+	}
+	return true
 }
 
 // buildPolyvPDXKeyURL constructs the key URL for a PDX-encrypted segment.

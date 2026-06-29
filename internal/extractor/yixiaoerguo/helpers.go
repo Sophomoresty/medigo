@@ -81,11 +81,25 @@ func extractItems(v any) []map[string]any {
 		for _, it := range arr {
 			if m := asMap(it); len(m) > 0 {
 				out = append(out, m)
+				continue
+			}
+			out = append(out, extractItems(it)...)
+		}
+		return out
+	}
+	if arr, ok := v.([]map[string]any); ok {
+		out := make([]map[string]any, 0, len(arr))
+		for _, m := range arr {
+			if len(m) > 0 {
+				out = append(out, m)
 			}
 		}
 		return out
 	}
 	m := asMap(v)
+	if len(m) == 0 {
+		return nil
+	}
 	for _, k := range []string{"list", "records", "items", "rows", "content", "courseList", "courses", "chapters", "sections", "children", "data"} {
 		if out := extractItems(m[k]); len(out) > 0 {
 			return out

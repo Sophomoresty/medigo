@@ -88,10 +88,58 @@ func assertGoldenOutcome(t *testing.T, media *extractor.MediaInfo, err error) {
 	}
 }
 
+func goldenFirstPlayableURL(mi *extractor.MediaInfo) string {
+	if mi == nil {
+		return ""
+	}
+	for _, stream := range mi.Streams {
+		for _, u := range stream.URLs {
+			if strings.TrimSpace(u) != "" {
+				return strings.TrimSpace(u)
+			}
+		}
+	}
+	for _, entry := range mi.Entries {
+		if u := goldenFirstPlayableURL(entry); u != "" {
+			return u
+		}
+	}
+	return ""
+}
+
+func goldenHasPlayableURL(mi *extractor.MediaInfo, want string) bool {
+	if mi == nil {
+		return false
+	}
+	for _, stream := range mi.Streams {
+		for _, u := range stream.URLs {
+			if strings.TrimSpace(u) == want {
+				return true
+			}
+		}
+	}
+	for _, entry := range mi.Entries {
+		if goldenHasPlayableURL(entry, want) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestExtractMock(t *testing.T) {
 	fixture := loadGoldenFixture(t)
+	leafFixture := []byte(`{"data":{"leaf_data":{"name":"Leaf 1","content_info":{"media":{"ccid":"cc1"}}}}}`)
+	playFixture := []byte(`{"data":{"sources":{"quality10":["https://media.example.com/xuetang/lesson-1.mp4"],"quality20":["https://media.example.com/xuetang/lesson-1-hd.mp4"]}}}`)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		switch {
+		case strings.Contains(r.URL.Path, "/api/v1/lms/learn/leaf_info/"):
+			_, _ = w.Write(leafFixture)
+			return
+		case strings.Contains(r.URL.Path, "/api/v1/lms/service/playurl/"):
+			_, _ = w.Write(playFixture)
+			return
+		}
 		_, _ = w.Write(fixture)
 	})
 	httpSrv := httptest.NewServer(handler)
@@ -107,6 +155,13 @@ func TestExtractMock(t *testing.T) {
 
 	media, err := (&Xuetang{}).Extract("https://www.xuetangx.com/course/sign123/1001", &extractor.ExtractOpts{Cookies: jar})
 	assertGoldenOutcome(t, media, err)
+	if err != nil {
+		t.Fatalf("Extract returned error against golden fixture: %v", err)
+	}
+	wantURL := "https://media.example.com/xuetang/lesson-1-hd.mp4"
+	if !goldenHasPlayableURL(media, wantURL) {
+		t.Fatalf("playable URLs do not contain expected fixture URL %q: %#v", wantURL, media)
+	}
 }
 
 func TestParseURLSourceExamples(t *testing.T) {

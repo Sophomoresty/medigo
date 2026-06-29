@@ -92,9 +92,11 @@ func (s *Chaoge) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 	seenVideo, seenFile := map[string]bool{}, map[string]bool{}
 	var entries []*extractor.MediaInfo
 	for _, item := range items {
-		if fileEntry := resolveFileEntry(item); fileEntry != nil && !seenFile[fileEntry.Streams["file"].URLs[0]] {
-			seenFile[fileEntry.Streams["file"].URLs[0]] = true
-			entries = append(entries, fileEntry)
+		if fileEntry := resolveFileEntry(item); fileEntry != nil {
+			if fileURL := firstEntryURL(fileEntry); fileURL != "" && !seenFile[fileURL] {
+				seenFile[fileURL] = true
+				entries = append(entries, fileEntry)
+			}
 		}
 		courseID := firstString(item, "course_id", "id")
 		if courseID == "" || seenVideo[courseID] || !shouldTryVideo(item, courseID == cid) {
@@ -353,6 +355,20 @@ func resolveFileEntry(item map[string]any) *extractor.MediaInfo {
 	title := cleanTitle(firstNonEmpty(firstString(item, "name", "title", "file_name"), fileURL[strings.LastIndex(fileURL, "/")+1:]))
 	fmtName := firstNonEmpty(firstString(item, "ext", "suffix", "file_fmt"), fileExt(fileURL), "bin")
 	return &extractor.MediaInfo{Site: "chaoge", Title: title, Streams: map[string]extractor.Stream{"file": {Quality: "source", URLs: []string{fileURL}, Format: fmtName, Headers: map[string]string{"Referer": refererURL}}}, Extra: map[string]any{"type": "file"}}
+}
+
+func firstEntryURL(info *extractor.MediaInfo) string {
+	if info == nil {
+		return ""
+	}
+	for _, stream := range info.Streams {
+		for _, raw := range stream.URLs {
+			if u := strings.TrimSpace(raw); u != "" {
+				return u
+			}
+		}
+	}
+	return ""
 }
 
 func parseCCInfo(c *util.Client, headers map[string]string, courseID string) (map[string]any, string, error) {

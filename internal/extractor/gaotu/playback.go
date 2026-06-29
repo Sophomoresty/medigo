@@ -21,15 +21,64 @@ func decodeWenzaiPCURL(c *util.Client, headers map[string]string, pc string) str
 	case strings.Contains(path, "/web/video/getplayurl"):
 		return getMediaJSON(c, headers, u.String())
 	case strings.Contains(path, "/web/playback/getplaybackinfo"):
-		qv := u.Query()
-		if !strings.Contains(path, "getplaybackinfov4") && qv.Get("end_type") == "" {
-			qv.Set("end_type", "4")
-			u.RawQuery = qv.Encode()
-		}
-		return getMediaJSON(c, headers, u.String())
+		return getFirstMediaJSON(c, headers, playbackURLVariants(u.String())...)
 	default:
 		return ""
 	}
+}
+
+func playbackURLVariants(raw string) []string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return nil
+	}
+	addEndType := func(in *url.URL) string {
+		out := *in
+		qv := out.Query()
+		if qv.Get("end_type") == "" {
+			qv.Set("end_type", "4")
+		}
+		out.RawQuery = qv.Encode()
+		return out.String()
+	}
+	replacePlaybackInfoName := func(in *url.URL, to string) string {
+		out := *in
+		lowPath := strings.ToLower(out.Path)
+		for _, from := range []string{"getplaybackinfov4", "getplaybackinfov3", "getplaybackinfo"} {
+			if idx := strings.LastIndex(lowPath, from); idx >= 0 {
+				out.Path = out.Path[:idx] + to + out.Path[idx+len(from):]
+				break
+			}
+		}
+		return out.String()
+	}
+	path := u.Path
+	lowPath := strings.ToLower(path)
+	var out []string
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	add(u.String())
+	switch {
+	case strings.Contains(lowPath, "getplaybackinfov4"):
+		add(replacePlaybackInfoName(u, "getPlaybackInfoV3"))
+		legacy, err := url.Parse(replacePlaybackInfoName(u, "getPlaybackInfo"))
+		if err == nil {
+			add(addEndType(legacy))
+		}
+	case strings.Contains(lowPath, "getplaybackinfov3"):
+		add(replacePlaybackInfoName(u, "getPlaybackInfoV4"))
+		legacy, err := url.Parse(replacePlaybackInfoName(u, "getPlaybackInfo"))
+		if err == nil {
+			add(addEndType(legacy))
+		}
+	case strings.Contains(lowPath, "getplaybackinfo"):
+		add(addEndType(u))
+	}
+	return dedupeStrings(out)
 }
 
 func gaotuMediaURLFromBody(body []byte) string {

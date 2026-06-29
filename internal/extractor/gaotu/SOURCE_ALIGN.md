@@ -19,13 +19,13 @@
 
 | 源码方法 | Go 函数 | method | 一致? |
 |---|---|---|---|
-| `_get_course_list` line 61 | `resolveCourse` fallback | POST JSON | ✓ |
+| `_get_course_list` line 61 | `resolveCourse` fallback + `gaotuCourseListRequestPayload()` pages 1..9 | POST JSON | ✓ |
 | `_get_infos` line 158 | `resolveCourse` | POST JSON | ✓ |
-| `_get_video_url` line 200 | `resolveLesson` | POST JSON | ✓ |
-| `_get_live_url` line 281 | `resolveLesson` | POST JSON | ✓ |
-| `_decode_video_url` / `_decode_inner_live_url` | `decodePcURL` | GET | ✓ |
+| `_get_video_url` line 200 / bytecode payload `liveId,sid,sessionId=0,roleType=0` | `resolveLesson` + `gaotuVideoRequestPayload()` | POST JSON | ✓ |
+| `_get_live_url` line 281 / bytecode payload `liveId,sessionId=0,roleType=0` | `resolveLesson` + `gaotuLiveRequestPayload()` + `postFormJSON()` | POST form, then JSON decode | ✓ |
+| `_decode_video_url` / `_decode_inner_live_url`; direct `api.wenzaizhibo.com` pcUrl | `decodePcURL`, `decodeWenzaiPCURL`, `playbackURLVariants()`, `directGaotuPCURL()` | GET, V4 -> V3 -> legacy `getPlaybackInfo&end_type=4` fallback | ✓ |
 | `_get_order_price` | `fetchGaotuOrderPrice` | POST JSON | ✓ |
-| `_check_cookie` extracts `__user_token__` into `Sid` | `gaotuAuthFromCookies` | Cookie jar -> headers | ✓ |
+| `_check_cookie` extracts `__user_token__` into `Sid`, `userId` into `Uid`, keeps Cookie header | `gaotuAuthFromCookies` | Cookie jar -> `Cookie`/`Sid`/`Uid` headers | ✓ |
 
 ## JSON 字段映射
 
@@ -35,7 +35,7 @@
 | `userClazzLessonBaseVO.clazzLessonName` | `lessonNode.Title` | ✓ |
 | `userClazzLessonBaseVO.clazzLessonNumber` | `lessonNode.ID` | ✓ |
 | `userClazzLessonBaseVO.bindType` | `lessonNode.Kind`, routes VOD vs live payload | ✓ |
-| `data.videoLiveDTO.pcUrl` / `data.signinLivePlayback.pcUrl` | `mediaFromPayload` + `collectStrings("pcUrl")` | ✓ |
+| `data.videoLiveDTO.pcUrl` / `data.signinLivePlayback.pcUrl`, plus raw Wenzai pcUrl input | `mediaFromPayload` + `collectStrings("pcUrl")` + `directGaotuPCURL` | ✓ |
 | Wenzai `data.play_info` / `data.signinLivePlayback` `cdn_list[].url/enc_url` | `gaotuMediaURLFromPayload`, `pickGaotuPlaybackURL`, `decodeBjcloudvod` | ✓ |
 | `data.payOrderList[].orderBaseVO.course.courseId` + `paymentInfo.originalPrice` | `gaotuOrderPriceFromPayload` | ✓ |
 

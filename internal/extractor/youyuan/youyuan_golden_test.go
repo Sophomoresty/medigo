@@ -88,10 +88,28 @@ func assertGoldenOutcome(t *testing.T, media *extractor.MediaInfo, err error) {
 	}
 }
 
+func TestExtractItemsNilReturnsEmpty(t *testing.T) {
+	if got := extractItems(nil); len(got) != 0 {
+		t.Fatalf("extractItems(nil) len=%d, want 0", len(got))
+	}
+}
+
 func TestExtractMock(t *testing.T) {
 	fixture := loadGoldenFixture(t)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if strings.Contains(r.URL.Path, "/course-api/app/course/getByCourseId") {
+			_, _ = w.Write([]byte(`{"data":{"courseName":"Test Course"}}`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/course-api/app/courseVideo/getToken") {
+			_, _ = w.Write([]byte(`{"data":{"videoId":"bjy-video-1","token":"bjy-token-1"}}`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/vod/video/getPlayUrl") {
+			_, _ = w.Write([]byte(`callback({"code":0,"data":{"video_url":"https://media.example.com/youyuan/lesson-1.mp4"}});`))
+			return
+		}
 		_, _ = w.Write(fixture)
 	})
 	httpSrv := httptest.NewServer(handler)
@@ -106,5 +124,28 @@ func TestExtractMock(t *testing.T) {
 	}
 
 	media, err := (&Youyuan{}).Extract("https://www.yijiayk.com/course?courseId=1001", &extractor.ExtractOpts{Cookies: jar})
+	if err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
 	assertGoldenOutcome(t, media, err)
+	if got := goldenFirstPlayableURL(media); got != "https://media.example.com/youyuan/lesson-1.mp4" {
+		t.Fatalf("first playable URL = %q, want %q", got, "https://media.example.com/youyuan/lesson-1.mp4")
+	}
+}
+
+func goldenFirstPlayableURL(media *extractor.MediaInfo) string {
+	if media == nil {
+		return ""
+	}
+	for _, stream := range media.Streams {
+		if len(stream.URLs) > 0 && strings.TrimSpace(stream.URLs[0]) != "" {
+			return strings.TrimSpace(stream.URLs[0])
+		}
+	}
+	for _, entry := range media.Entries {
+		if got := goldenFirstPlayableURL(entry); got != "" {
+			return got
+		}
+	}
+	return ""
 }

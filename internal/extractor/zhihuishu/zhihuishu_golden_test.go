@@ -92,6 +92,18 @@ func TestExtractMock(t *testing.T) {
 	fixture := loadGoldenFixture(t)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if strings.Contains(r.URL.Path, "/courseHome/") {
+			_, _ = w.Write([]byte(`<html><script>var courseName = "Test Course"; var schoolName = "Test School"; var termId = 100; var recruitId = 999;</script></html>`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/home/toNewInterestKeep/") {
+			http.Redirect(w, r, "https://coursehome.zhihuishu.com/home?recruitAndCourseId=crid-1", http.StatusFound)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/video/changeVideoLine") {
+			_, _ = w.Write([]byte(`{"result":"https://media.example.com/zhihuishu/lesson-1.mp4"}`))
+			return
+		}
 		_, _ = w.Write(fixture)
 	})
 	httpSrv := httptest.NewServer(handler)
@@ -106,5 +118,28 @@ func TestExtractMock(t *testing.T) {
 	}
 
 	media, err := (&Zhihuishu{}).Extract("https://www.zhihuishu.com/courseHome/1001?ft=map", &extractor.ExtractOpts{Cookies: jar})
+	if err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
 	assertGoldenOutcome(t, media, err)
+	if got := goldenFirstPlayableURL(media); got != "https://media.example.com/zhihuishu/lesson-1.mp4" {
+		t.Fatalf("first playable URL = %q, want %q", got, "https://media.example.com/zhihuishu/lesson-1.mp4")
+	}
+}
+
+func goldenFirstPlayableURL(media *extractor.MediaInfo) string {
+	if media == nil {
+		return ""
+	}
+	for _, stream := range media.Streams {
+		if len(stream.URLs) > 0 && strings.TrimSpace(stream.URLs[0]) != "" {
+			return strings.TrimSpace(stream.URLs[0])
+		}
+	}
+	for _, entry := range media.Entries {
+		if got := goldenFirstPlayableURL(entry); got != "" {
+			return got
+		}
+	}
+	return ""
 }

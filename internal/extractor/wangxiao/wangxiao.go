@@ -126,7 +126,7 @@ func (w *Wangxiao) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 			if entry == nil || len(entry.Streams) == 0 {
 				continue
 			}
-			key := entry.Streams["default"].URLs[0]
+			key := firstStreamURL(entry)
 			if key == "" || seen[key] {
 				continue
 			}
@@ -680,6 +680,27 @@ func cloneMap(m map[string]string) map[string]string {
 func cleanText(s string) string {
 	s = regexp.MustCompile(`(?is)<[^>]+>`).ReplaceAllString(s, "")
 	return strings.TrimSpace(s)
+}
+
+func firstStreamURL(entry *extractor.MediaInfo) string {
+	if entry == nil {
+		return ""
+	}
+	if stream, ok := entry.Streams["default"]; ok {
+		for _, u := range stream.URLs {
+			if u = strings.TrimSpace(u); u != "" {
+				return u
+			}
+		}
+	}
+	for _, stream := range entry.Streams {
+		for _, u := range stream.URLs {
+			if u = strings.TrimSpace(u); u != "" {
+				return u
+			}
+		}
+	}
+	return ""
 }
 
 func firstString(m map[string]any, keys ...string) string {

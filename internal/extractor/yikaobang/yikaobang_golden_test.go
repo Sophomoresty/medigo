@@ -107,18 +107,39 @@ func TestExtractMock(t *testing.T) {
 	setYKBTestToken(t, jar)
 
 	media, err := (&Yikaobang{}).Extract("https://www.yikaobang.com.cn/course/1001", &extractor.ExtractOpts{Cookies: jar})
+	if err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
 	assertGoldenOutcome(t, media, err)
-	if err == nil {
-		if len(media.Entries) != 2 {
-			t.Fatalf("Entries = %d, want 2 video/file entries: %#v", len(media.Entries), media)
-		}
-		if media.Entries[0].Streams["best"].Format != "m3u8" {
-			t.Fatalf("first entry format = %q, want m3u8", media.Entries[0].Streams["best"].Format)
-		}
-		if media.Entries[1].Streams["file"].Format != "pdf" {
-			t.Fatalf("second entry format = %q, want pdf", media.Entries[1].Streams["file"].Format)
+	if len(media.Entries) != 2 {
+		t.Fatalf("Entries = %d, want 2 video/file entries: %#v", len(media.Entries), media)
+	}
+	if media.Entries[0].Streams["best"].Format != "m3u8" {
+		t.Fatalf("first entry format = %q, want m3u8", media.Entries[0].Streams["best"].Format)
+	}
+	if media.Entries[1].Streams["file"].Format != "pdf" {
+		t.Fatalf("second entry format = %q, want pdf", media.Entries[1].Streams["file"].Format)
+	}
+	if got := goldenFirstPlayableURL(media); got != "https://cdn.example.com/ykb/intro.m3u8" {
+		t.Fatalf("first playable URL = %q, want %q", got, "https://cdn.example.com/ykb/intro.m3u8")
+	}
+}
+
+func goldenFirstPlayableURL(media *extractor.MediaInfo) string {
+	if media == nil {
+		return ""
+	}
+	for _, stream := range media.Streams {
+		if len(stream.URLs) > 0 && strings.TrimSpace(stream.URLs[0]) != "" {
+			return strings.TrimSpace(stream.URLs[0])
 		}
 	}
+	for _, entry := range media.Entries {
+		if got := goldenFirstPlayableURL(entry); got != "" {
+			return got
+		}
+	}
+	return ""
 }
 
 func setYKBTestToken(t *testing.T, jar http.CookieJar) {

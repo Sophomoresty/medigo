@@ -159,6 +159,11 @@ func unpadPKCS7(data []byte) ([]byte, error) {
 	if pad == 0 || pad > len(data) || pad > aes.BlockSize {
 		return data, nil // no padding
 	}
+	for _, b := range data[len(data)-pad:] {
+		if int(b) != pad {
+			return data, nil // invalid padding, keep original plaintext
+		}
+	}
 	return data[:len(data)-pad], nil
 }
 
@@ -349,6 +354,9 @@ func decryptCBCSegment(ciphertext, key, iv []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
+	}
+	if len(iv) != block.BlockSize() {
+		return nil, fmt.Errorf("invalid AES-CBC IV length %d", len(iv))
 	}
 	if len(ciphertext)%aes.BlockSize != 0 {
 		return nil, fmt.Errorf("ciphertext not block-aligned")

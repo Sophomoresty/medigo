@@ -92,6 +92,10 @@ func TestExtractMock(t *testing.T) {
 	fixture := loadGoldenFixture(t)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if strings.Contains(r.URL.Path, "recordquery") {
+			_, _ = w.Write([]byte(`{"data":[{"cdn_url":"https://media.example.com/yixiaoerguo/lesson-1.m3u8","duration":20,"size":1024}]}`))
+			return
+		}
 		_, _ = w.Write(fixture)
 	})
 	httpSrv := httptest.NewServer(handler)
@@ -104,7 +108,42 @@ func TestExtractMock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new cookie jar: %v", err)
 	}
+	setYixiaoerguoTestToken(t, jar)
 
 	media, err := (&Yixiaoerguo{}).Extract("https://www.biguo.cn/courses/0123456789abcdef01234567", &extractor.ExtractOpts{Cookies: jar})
+	if err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
 	assertGoldenOutcome(t, media, err)
+	if got := goldenFirstPlayableURL(media); got != "https://media.example.com/yixiaoerguo/lesson-1.m3u8" {
+		t.Fatalf("first playable URL = %q, want %q", got, "https://media.example.com/yixiaoerguo/lesson-1.m3u8")
+	}
+}
+
+func setYixiaoerguoTestToken(t *testing.T, jar http.CookieJar) {
+	t.Helper()
+	for _, raw := range []string{refererURL, originURL + "/", apiBase + "/"} {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse cookie origin %q: %v", raw, err)
+		}
+		jar.SetCookies(u, []*http.Cookie{{Name: "sc_token_pro", Value: "test-token"}})
+	}
+}
+
+func goldenFirstPlayableURL(media *extractor.MediaInfo) string {
+	if media == nil {
+		return ""
+	}
+	for _, stream := range media.Streams {
+		if len(stream.URLs) > 0 && strings.TrimSpace(stream.URLs[0]) != "" {
+			return strings.TrimSpace(stream.URLs[0])
+		}
+	}
+	for _, entry := range media.Entries {
+		if got := goldenFirstPlayableURL(entry); got != "" {
+			return got
+		}
+	}
+	return ""
 }

@@ -215,7 +215,7 @@ func mashibingPolyvDecode(videoID, bodyHex string) map[string]any {
 	}
 	plain := make([]byte, len(cipherText))
 	cipher.NewCBCDecrypter(block, []byte(digest[16:32])).CryptBlocks(plain, cipherText)
-	if pad := int(plain[len(plain)-1]); pad > 0 && pad <= aes.BlockSize && pad <= len(plain) {
+	if pad := int(plain[len(plain)-1]); validPKCS7Padding(plain, pad) {
 		plain = plain[:len(plain)-pad]
 	}
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(plain)))

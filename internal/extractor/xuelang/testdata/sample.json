@@ -1,5 +1,5 @@
 {
-  "status_code": 1,
+  "status_code": 0,
   "data": {
     "student_course": {
       "data": [
@@ -17,7 +17,7 @@
           "title": "Lesson 1",
           "related_room_id_str": "room1",
           "video": {
-            "play_auth_token": "auth1"
+            "play_auth_token": "eyJHZXRQbGF5SW5mb1Rva2VuIjoicGxheV90b2tlbj1tb2NrIn0="
           }
         }
       }
@@ -25,6 +25,17 @@
     "forward_cursor": {
       "cursor": "0",
       "has_more": false
+    }
+  },
+  "Result": {
+    "Data": {
+      "VideoID": "vid1",
+      "PlayInfoList": [
+        {
+          "MainPlayUrl": "https://media.example.com/xuelang/lesson-1.m3u8",
+          "Size": 1024
+        }
+      ]
     }
   }
 }

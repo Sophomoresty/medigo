@@ -409,6 +409,9 @@ func aesDecryptWithStatic(encrypted, key, iv string) string {
 	if err != nil {
 		return ""
 	}
+	if len(iv) != block.BlockSize() {
+		return ""
+	}
 	if len(ciphertext) == 0 || len(ciphertext)%aes.BlockSize != 0 {
 		return ""
 	}

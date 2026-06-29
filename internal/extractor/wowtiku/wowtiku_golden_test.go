@@ -166,6 +166,21 @@ func firstPlayableURL(mi *extractor.MediaInfo) string {
 	return ""
 }
 
+func TestFirstStreamURLHandlesSparseStreams(t *testing.T) {
+	got := firstStreamURL(&extractor.MediaInfo{
+		Streams: map[string]extractor.Stream{
+			"default": {URLs: nil},
+			"file":    {URLs: []string{"", " https://cdn.example.com/file.pdf "}},
+		},
+	})
+	if got != "https://cdn.example.com/file.pdf" {
+		t.Fatalf("firstStreamURL=%q", got)
+	}
+	if got := firstStreamURL(&extractor.MediaInfo{Streams: map[string]extractor.Stream{"default": {URLs: nil}}}); got != "" {
+		t.Fatalf("firstStreamURL for empty default=%q", got)
+	}
+}
+
 func TestExtractMock(t *testing.T) {
 	fixtures := loadFixtures(t)
 	installMockTransport(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

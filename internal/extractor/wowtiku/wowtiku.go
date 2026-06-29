@@ -108,7 +108,7 @@ func (s *Wowtiku) Extract(rawURL string, opts *extractor.ExtractOpts) (*extracto
 		if err != nil || entry == nil || len(entry.Streams) == 0 {
 			continue
 		}
-		u := entry.Streams["default"].URLs[0]
+		u := firstStreamURL(entry)
 		if u != "" && !seen[u] {
 			seen[u] = true
 			entries = append(entries, entry)
@@ -119,7 +119,7 @@ func (s *Wowtiku) Extract(rawURL string, opts *extractor.ExtractOpts) (*extracto
 		if entry == nil || len(entry.Streams) == 0 {
 			continue
 		}
-		u := entry.Streams["default"].URLs[0]
+		u := firstStreamURL(entry)
 		if u != "" && !seen["file:"+u] {
 			seen["file:"+u] = true
 			entries = append(entries, entry)
@@ -573,6 +573,27 @@ func compactAnyMap(in map[string]any) map[string]any {
 		}
 	}
 	return out
+}
+
+func firstStreamURL(entry *extractor.MediaInfo) string {
+	if entry == nil {
+		return ""
+	}
+	if stream, ok := entry.Streams["default"]; ok {
+		for _, u := range stream.URLs {
+			if u = strings.TrimSpace(u); u != "" {
+				return u
+			}
+		}
+	}
+	for _, stream := range entry.Streams {
+		for _, u := range stream.URLs {
+			if u = strings.TrimSpace(u); u != "" {
+				return u
+			}
+		}
+	}
+	return ""
 }
 
 func val(m map[string]any, k string) string {

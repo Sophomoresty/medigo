@@ -163,13 +163,6 @@ func resolveVisibleLectures(c *util.Client, headers map[string]string) ([]*extra
 			})
 			continue
 		}
-		extra := map[string]any{"prefix": prefix, "lecture_id": lectureID, "raw": lecture}
-		applyPaymentExtra(extra, lecture)
-		entries = append(entries, &extractor.MediaInfo{
-			Site:  "fenbi",
-			Title: util.SanitizeFilename(title),
-			Extra: extra,
-		})
 	}
 	return entries, nil
 }

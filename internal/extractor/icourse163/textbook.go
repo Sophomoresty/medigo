@@ -38,9 +38,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/Sophomoresty/mediago/internal/extractor"
 	"github.com/Sophomoresty/mediago/internal/util"
+	"github.com/google/uuid"
 )
 
 // Constants ported verbatim from Icourse163_Textbook.
@@ -159,22 +159,7 @@ func (t *ICourse163Textbook) Extract(rawURL string, opts *extractor.ExtractOpts)
 			continue
 		}
 
-		sectionTitle := lf.title
-		if toc != nil {
-			if t, ok := toc["Title"].(string); ok && t != "" {
-				sectionTitle = t
-			}
-		}
-
-		entries = append(entries, &extractor.MediaInfo{
-			Site:  "icourse163_textbook",
-			Title: sanitize(sectionTitle),
-			Extra: map[string]any{
-				"index":       i + 1,
-				"external_id": lf.externalID,
-				"content":     normalizeContentHTML(content),
-			},
-		})
+		entries = append(entries, textbookSectionEntry(cid, lf, toc, content, i+1))
 	}
 
 	if len(entries) == 0 {
@@ -193,6 +178,33 @@ func (t *ICourse163Textbook) Extract(rawURL string, opts *extractor.ExtractOpts)
 			"fetched":        len(entries),
 		},
 	}, nil
+}
+
+func textbookSectionEntry(cid string, lf textbookLeaf, toc map[string]any, content string, index int) *extractor.MediaInfo {
+	sectionTitle := lf.title
+	if toc != nil {
+		if title, ok := toc["Title"].(string); ok && title != "" {
+			sectionTitle = title
+		}
+	}
+	normalized := normalizeContentHTML(content)
+	return &extractor.MediaInfo{
+		Site:  "icourse163_textbook",
+		Title: sanitize(sectionTitle),
+		Streams: map[string]extractor.Stream{
+			"document": {
+				Quality: "document",
+				URLs:    []string{"data:text/html;charset=utf-8," + url.PathEscape(normalized)},
+				Format:  "html",
+				Headers: textbookHeaders(cid),
+			},
+		},
+		Extra: map[string]any{
+			"index":       index,
+			"external_id": lf.externalID,
+			"content":     normalized,
+		},
+	}
 }
 
 // ---------- HEP API client ----------

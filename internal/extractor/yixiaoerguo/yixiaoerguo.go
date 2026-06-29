@@ -387,7 +387,7 @@ func (x *yxContext) apiHeaders(path string) map[string]string {
 }
 
 func xscNonce() string {
-	id, err := uuid.NewUUID()
+	id, err := uuid.NewRandom()
 	if err == nil {
 		return id.String()
 	}
@@ -482,6 +482,12 @@ func collectVideos(payload map[string]any) []yxVideo {
 			}
 			return
 		}
+		if arr, ok := v.([]map[string]any); ok {
+			for i, it := range arr {
+				walk(it, append(idx, i+1), append([]string{}, names...))
+			}
+			return
+		}
 		m := asMap(v)
 		if len(m) == 0 {
 			return
@@ -495,7 +501,7 @@ func collectVideos(payload map[string]any) []yxVideo {
 			walk(children, idx, names)
 			return
 		}
-		id := firstString(m, "id", "sectionId", "periodId")
+		id := firstString(m, "id", "sectionId", "section_id", "periodId", "period_id")
 		if id == "" {
 			return
 		}
@@ -505,7 +511,7 @@ func collectVideos(payload map[string]any) []yxVideo {
 				expectedDuration = fmt.Sprint(duration)
 			}
 		}
-		out = append(out, yxVideo{SectionID: id, Type: firstString(m, "type", "sectionType"), State: firstString(m, "state"), Title: cleanTitle(fmt.Sprintf("[%s]--%s", joinIdx(idx), firstNonEmpty(name, id))), Duration: expectedDuration, CanTry: boolValue(firstNonNil(m["can_try"], m["canTry"]))})
+		out = append(out, yxVideo{SectionID: id, Type: firstString(m, "type", "sectionType", "section_type"), State: firstString(m, "state"), Title: cleanTitle(fmt.Sprintf("[%s]--%s", joinIdx(idx), firstNonEmpty(name, id))), Duration: expectedDuration, CanTry: boolValue(firstNonNil(m["can_try"], m["canTry"]))})
 	}
 	walk(chapters, nil, nil)
 	return out

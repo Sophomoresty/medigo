@@ -77,7 +77,7 @@ func (c *Cnmooc) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 		}
 		for ii, item := range extractPlayerItems(text) {
 			mi := resolveItem(client, opts.Cookies, item, openID, fmt.Sprintf("%02d.%02d", pi+1, ii+1))
-			if mi != nil && !seenKey(seen, mi.Streams["best"].URLs[0]) {
+			if u := firstMediaURL(mi); u != "" && !seenKey(seen, u) {
 				entries = append(entries, mi)
 			}
 		}
@@ -448,6 +448,26 @@ func seenKey(seen map[string]bool, key string) bool {
 	}
 	seen[key] = true
 	return false
+}
+func firstMediaURL(info *extractor.MediaInfo) string {
+	if info == nil {
+		return ""
+	}
+	if stream, ok := info.Streams["best"]; ok {
+		for _, raw := range stream.URLs {
+			if u := strings.TrimSpace(raw); u != "" {
+				return u
+			}
+		}
+	}
+	for _, stream := range info.Streams {
+		for _, raw := range stream.URLs {
+			if u := strings.TrimSpace(raw); u != "" {
+				return u
+			}
+		}
+	}
+	return ""
 }
 func dedup(in []string) []string {
 	seen := map[string]bool{}

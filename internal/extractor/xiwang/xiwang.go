@@ -154,6 +154,9 @@ func (s *Xiwang) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 		return nil, fmt.Errorf("xiwang requires login cookies")
 	}
 	b := &s.brand
+	if b.checkLogin == "" {
+		b = &xiwangBrand
+	}
 	c := util.NewClient()
 	c.SetCookieJar(opts.Cookies)
 	h := brandHeaders(b, opts.Cookies)

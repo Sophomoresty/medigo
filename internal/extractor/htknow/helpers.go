@@ -107,6 +107,11 @@ func pkcs7Unpad(b []byte) []byte {
 	if n <= 0 || n > aes.BlockSize || n > len(b) {
 		return b
 	}
+	for _, v := range b[len(b)-n:] {
+		if int(v) != n {
+			return b
+		}
+	}
 	return b[:len(b)-n]
 }
 func mapAt(m map[string]any, keys ...string) map[string]any {
