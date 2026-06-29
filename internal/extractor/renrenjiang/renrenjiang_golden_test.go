@@ -170,8 +170,12 @@ func TestExtractMock(t *testing.T) {
 	fixtures := loadFixtures(t)
 	installMockTransport(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Host == "api.renrenjiang.cn" && r.Method == http.MethodGet && r.URL.Path == "/api/v3/account/get_user_info":
+			_, _ = w.Write([]byte(`{"result":"ok","user":{"id":"42","nickname":"tester"}}`))
 		case r.Host == "api.renrenjiang.cn" && r.Method == http.MethodGet && r.URL.Path == "/api/v2/activities/1001":
 			writeFixture(t, w, fixtures, "activity_detail")
+		case r.Host == "api.renrenjiang.cn" && r.Method == http.MethodGet && r.URL.Path == "/api/v3/activities/1001/is_pay":
+			_, _ = w.Write([]byte(`{"result":"ok","is_pay":true}`))
 		case r.Host == "api.renrenjiang.cn" && r.Method == http.MethodGet && r.URL.Path == "/api/v3/activities/1001/stream/info":
 			writeFixture(t, w, fixtures, "activity_stream")
 		case r.Host == "api.renrenjiang.cn" && r.Method == http.MethodGet && r.URL.Path == "/api/v3/activities/1001/stream_url":

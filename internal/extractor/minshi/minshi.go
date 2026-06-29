@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/Sophomoresty/mediago/internal/extractor"
@@ -62,7 +64,7 @@ func (s *Minshi) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 	}
 	c := util.NewClient()
 	c.SetCookieJar(opts.Cookies)
-	h := headers(course_home_route)
+	h := headersFromJar(opts.Cookies, course_home_route)
 	cid := parseCID(rawURL)
 	courses, _ := requestAPI(c, course_list_api, "POST", map[string]string{"playMethod": ""}, h)
 	if cid == "" {
@@ -87,11 +89,12 @@ func (s *Minshi) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 	if len(lessons) == 0 {
 		return nil, fmt.Errorf("minshi: no courseTableId/videoId lessons in data")
 	}
+	catalogGroups := buildCatalogGroups(info)
 	var entries []*extractor.MediaInfo
 	seen := map[string]bool{}
 	for i, le := range lessons {
 		if le.TableID != "" && le.VideoID == "" {
-			detail, _ := requestAPI(c, fmt.Sprintf(course_detail_api, url.PathEscape(le.TableID)), "GET", nil, headers("/courseCatalog/"+le.TableID))
+			detail, _ := requestAPI(c, fmt.Sprintf(course_detail_api, url.PathEscape(le.TableID)), "GET", nil, headersFromJar(opts.Cookies, "/courseCatalog/"+le.TableID))
 			le.VideoID = findFirst(detail, "videoId", "vid")
 			if le.Title == "" {
 				le.Title = findFirst(detail, "title", "name", "tableName")
@@ -112,7 +115,8 @@ func (s *Minshi) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 		if manifest != "" {
 			extra["m3u8_manifest"] = manifest
 		}
-		entries = append(entries, &extractor.MediaInfo{Site: "minshi", Title: name, Streams: map[string]extractor.Stream{"best": {Quality: "best", URLs: []string{streamURL}, Format: formatOf(streamURL), Headers: h}}, Extra: extra})
+		format := formatOf(streamURL)
+		entries = append(entries, &extractor.MediaInfo{Site: "minshi", Title: name, Streams: map[string]extractor.Stream{"best": {Quality: "best", URLs: []string{streamURL}, Format: format, NeedMerge: format == "m3u8", Headers: h}}, Extra: extra})
 	}
 	// Promote source materials / file artifacts to first-class entries.
 	fileEntries := collectFileEntries(c, cid, lessons, h)
@@ -121,7 +125,16 @@ func (s *Minshi) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("minshi: no playable videos or downloadable files found")
 	}
-	return &extractor.MediaInfo{Site: "minshi", Title: clean(title), Entries: entries, Extra: map[string]any{"course_id": cid}}, nil
+	extra := map[string]any{
+		"course_id": cid,
+		"price":     extractPrice(courses, info),
+		"purchased": true,
+		"valid":     fetchValid(c, cid, h),
+	}
+	if len(catalogGroups) > 0 {
+		extra["catalog"] = catalogGroups
+	}
+	return &extractor.MediaInfo{Site: "minshi", Title: clean(title), Entries: entries, Extra: extra}, nil
 }
 
 type playToken struct{ Token, VideoID string }
@@ -135,7 +148,7 @@ func getPlayToken(c *util.Client, le lesson, cid string) playToken {
 		if err != nil {
 			continue
 		}
-		pt := playToken{Token: findFirst(v, "playsafe", "playSafe", "token"), VideoID: first(findFirst(v, "videoId", "vid"), le.VideoID)}
+		pt := playToken{Token: pickPlayToken(v), VideoID: first(findFirst(v, "videoId", "vid"), le.VideoID)}
 		if pt.Token != "" || pt.VideoID != "" {
 			_ = cid
 			return pt
@@ -209,7 +222,19 @@ func fetchValid(c *util.Client, cid string, h map[string]string) bool {
 	if err != nil {
 		return false
 	}
-	return !strings.Contains(strings.ToLower(fmt.Sprint(v)), "expired")
+	if m, ok := v.(map[string]any); ok {
+		for _, key := range []string{"valid", "isValid"} {
+			if value, exists := m[key]; exists {
+				return truthy(value)
+			}
+		}
+		msg := strings.ToLower(firstTextMap(m, "msg", "message"))
+		if msg != "" {
+			return !strings.Contains(msg, "expire") && !strings.Contains(msg, "过期") && !strings.Contains(msg, "失效")
+		}
+	}
+	low := strings.ToLower(fmt.Sprint(v))
+	return !strings.Contains(low, "expired") && !strings.Contains(low, "expire") && !strings.Contains(low, "过期") && !strings.Contains(low, "失效")
 }
 
 func collectLessons(v any) []lesson {
@@ -257,7 +282,7 @@ func collectFileEntries(c *util.Client, cid string, lessons []lesson, h map[stri
 			if fileName == "" {
 				return
 			}
-			fileFmt := normalizeFileFmt(firstTextMap(m, "fileType"), fileName, fileURL)
+			fileFmt := normalizeFileFmt(firstTextMap(m, "fileType", "fileFmt", "suffix", "ext"), fileName, fileURL)
 			// Strip extension from display name (source: _build_file_info)
 			displayName := fileName
 			if dot := strings.LastIndex(displayName, "."); dot >= 0 {
@@ -365,6 +390,53 @@ func headers(route string) map[string]string {
 	return map[string]string{"Accept": "application/json, text/plain, */*", "Origin": origin, "Referer": origin + "#" + route, "joineast-request-path": route, "joineast-system-id": system_id, "platform-proxy": platform_proxy, "Content-Type": "application/json;charset=UTF-8"}
 }
 
+func headersFromJar(jar http.CookieJar, route string) map[string]string {
+	h := headers(route)
+	payload := minshiCookiePayload(jar)
+	if payload != "" {
+		h["cookie"] = payload
+		h["Cookie"] = payload
+		if token := pickTokenFromRaw(payload); token != "" {
+			h["authorization"] = token
+		}
+	}
+	return h
+}
+
+func minshiCookiePayload(jar http.CookieJar) string {
+	if jar == nil {
+		return ""
+	}
+	seen := map[string]bool{}
+	for _, raw := range []string{origin, "https://www.minshiedu.com/"} {
+		u, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		for _, ck := range jar.Cookies(u) {
+			value := strings.TrimSpace(ck.Value)
+			if value == "" || seen[ck.Name] {
+				continue
+			}
+			seen[ck.Name] = true
+			if strings.HasPrefix(value, "{") || strings.HasPrefix(value, "[") || strings.Contains(value, "token") || strings.Contains(value, "Authorization") {
+				return value
+			}
+		}
+	}
+	var parts []string
+	for _, raw := range []string{origin, "https://www.minshiedu.com/"} {
+		u, _ := url.Parse(raw)
+		for _, ck := range jar.Cookies(u) {
+			key := ck.Name + "=" + ck.Value
+			if key != "=" {
+				parts = append(parts, key)
+			}
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
 func firstCourseID(v any) string { return findFirst(v, "id", "courseId", "course_id") }
 func firstCourseTitle(v any, id string) string {
 	_ = id
@@ -383,6 +455,21 @@ func walk(v any, fn func(map[string]any)) {
 		}
 	}
 }
+
+func walkValues(v any, fn func(any)) {
+	fn(v)
+	switch t := v.(type) {
+	case map[string]any:
+		for _, x := range t {
+			walkValues(x, fn)
+		}
+	case []any:
+		for _, x := range t {
+			walkValues(x, fn)
+		}
+	}
+}
+
 func firstTextMap(m map[string]any, keys ...string) string {
 	for _, k := range keys {
 		if v, ok := m[k]; ok && v != nil {
@@ -394,6 +481,56 @@ func firstTextMap(m map[string]any, keys ...string) string {
 	}
 	return ""
 }
+
+func pickPlayToken(v any) string {
+	if token := findFirst(v, "playsafe", "playSafe", "play_safe", "playSafeToken", "playToken", "play_token"); token != "" {
+		return pickTokenFromRaw(token)
+	}
+	out := ""
+	walkValues(v, func(x any) {
+		if out != "" {
+			return
+		}
+		switch t := x.(type) {
+		case map[string]any:
+			for _, key := range []string{"token"} {
+				if s := firstTextMap(t, key); s != "" {
+					out = s
+					return
+				}
+			}
+		case string:
+			out = pickTokenFromRaw(t)
+		}
+	})
+	return out
+}
+
+func pickTokenFromRaw(raw string) string {
+	raw = strings.Trim(strings.TrimSpace(raw), `'"`)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "{") || strings.HasPrefix(raw, "[") {
+		var decoded any
+		if json.Unmarshal([]byte(raw), &decoded) == nil {
+			if token := pickPlayToken(decoded); token != "" {
+				return token
+			}
+		}
+	}
+	for _, key := range []string{"Authorization", "authorization", "access_token", "accessToken", "token"} {
+		re := regexp.MustCompile(`(?:^|[?&;,\s])` + regexp.QuoteMeta(key) + `\s*[:=]\s*"?([^";,\s]+)`)
+		if m := re.FindStringSubmatch(raw); len(m) > 1 {
+			return strings.TrimSpace(m[1])
+		}
+	}
+	if !strings.Contains(raw, "=") && !strings.HasPrefix(raw, "http") {
+		return raw
+	}
+	return ""
+}
+
 func findFirst(v any, keys ...string) string {
 	out := ""
 	walk(v, func(m map[string]any) {
@@ -402,6 +539,116 @@ func findFirst(v any, keys ...string) string {
 		}
 	})
 	return out
+}
+
+func buildCatalogGroups(info any) []map[string]any {
+	var groups []map[string]any
+	switch root := info.(type) {
+	case map[string]any:
+		for _, key := range []string{"courseList", "children", "childList", "list"} {
+			if rows, ok := root[key].([]any); ok {
+				for _, row := range rows {
+					if m, ok := row.(map[string]any); ok {
+						lessons := collectLessons(m)
+						if len(lessons) == 0 {
+							continue
+						}
+						groups = append(groups, map[string]any{
+							"title":   first(firstTextMap(m, "title", "name", "chapterName", "catalogName"), "默认章节"),
+							"lessons": lessonSummaries(lessons),
+						})
+					}
+				}
+			}
+		}
+	}
+	if len(groups) == 0 {
+		lessons := collectLessons(info)
+		if len(lessons) > 0 {
+			groups = append(groups, map[string]any{"title": "默认章节", "lessons": lessonSummaries(lessons)})
+		}
+	}
+	return groups
+}
+
+func lessonSummaries(lessons []lesson) []map[string]string {
+	out := make([]map[string]string, 0, len(lessons))
+	for _, le := range lessons {
+		out = append(out, map[string]string{"course_table_id": le.TableID, "video_id": le.VideoID, "title": le.Title})
+	}
+	return out
+}
+
+func extractPrice(payloads ...any) float64 {
+	for _, payload := range payloads {
+		var price float64
+		walk(payload, func(m map[string]any) {
+			if price > 0 {
+				return
+			}
+			for _, key := range []string{"showPrice", "salePrice", "discountPrice", "price", "goodsPrice", "payPrice", "marketPrice", "originalPrice", "activityPrice", "coursePrice", "sellingPrice", "realPrice", "amount"} {
+				if p := normalizePrice(m[key]); p > 0 {
+					price = p
+					return
+				}
+			}
+		})
+		if price > 0 {
+			return price
+		}
+	}
+	return 0
+}
+
+func normalizePrice(value any) float64 {
+	var f float64
+	switch x := value.(type) {
+	case int:
+		f = float64(x)
+	case int64:
+		f = float64(x)
+	case float64:
+		f = x
+	case string:
+		m := regexp.MustCompile(`\d+(?:\.\d+)?`).FindString(x)
+		if m == "" {
+			return 0
+		}
+		parsed, err := strconv.ParseFloat(m, 64)
+		if err != nil {
+			return 0
+		}
+		f = parsed
+	default:
+		s := strings.TrimSpace(fmt.Sprint(value))
+		if s == "" || s == "<nil>" {
+			return 0
+		}
+		return normalizePrice(s)
+	}
+	if f > 5000 && f == float64(int64(f)) {
+		f /= 100
+	}
+	return f
+}
+
+func truthy(value any) bool {
+	switch x := value.(type) {
+	case bool:
+		return x
+	case int:
+		return x != 0
+	case int64:
+		return x != 0
+	case float64:
+		return x != 0
+	}
+	switch strings.ToLower(strings.TrimSpace(fmt.Sprint(value))) {
+	case "", "0", "false", "no", "null", "<nil>", "过期", "失效", "expired":
+		return false
+	default:
+		return true
+	}
 }
 func first(vals ...string) string {
 	for _, v := range vals {

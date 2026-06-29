@@ -3,6 +3,7 @@ package classin
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -25,34 +26,63 @@ func (e classinEnvelope) ok() bool { return e.ErrorInfo.Errno == 1 }
 
 type courseItem struct {
 	CourseID   string `json:"courseId"`
+	CourseID2  string `json:"clientCourseId"`
 	CourseName string `json:"courseName"`
+	Name       string `json:"name"`
+	Title      string `json:"title"`
 	SchoolUID  string `json:"schoolUid"`
+	SchoolUID2 string `json:"school_uid"`
 }
+
+func (c courseItem) id() string { return firstNonEmpty(c.CourseID, c.CourseID2) }
+func (c courseItem) title() string {
+	return firstNonEmpty(c.CourseName, c.Name, c.Title, "ClassIn课程")
+}
+func (c courseItem) sid() string { return firstNonEmpty(c.SchoolUID, c.SchoolUID2) }
 
 type categoryItem struct {
 	CategoryID   string `json:"categoryId"`
+	CategoryID2  string `json:"id"`
 	Name         string `json:"name"`
 	CategoryName string `json:"categoryName"`
 	Title        string `json:"title"`
 }
 
+func (c categoryItem) id() string { return firstNonEmpty(c.CategoryID, c.CategoryID2) }
+
 type unitItem struct {
 	UnitID   string `json:"unitId"`
+	UnitID2  string `json:"id"`
 	UnitName string `json:"unitName"`
 	Name     string `json:"name"`
 	Title    string `json:"title"`
 }
 
+func (u unitItem) id() string { return firstNonEmpty(u.UnitID, u.UnitID2) }
+
 type activityItem struct {
 	ActivityID   string `json:"activityId"`
+	ActivityID2  string `json:"id"`
 	BizID        string `json:"bizId"`
 	ClassID      string `json:"classId"`
+	ClassID2     string `json:"clientClassId"`
 	Type         int    `json:"type"`
+	ActivityType int    `json:"activityType"`
 	ActivityName string `json:"activityName"`
 	Name         string `json:"name"`
 	Title        string `json:"title"`
 }
 
+func (a activityItem) id() string { return firstNonEmpty(a.ActivityID, a.ActivityID2, a.BizID) }
+func (a activityItem) classID() string {
+	return firstNonEmpty(a.BizID, a.ClassID, a.ClassID2, a.ActivityID, a.ActivityID2)
+}
+func (a activityItem) kind() int {
+	if a.Type != 0 {
+		return a.Type
+	}
+	return a.ActivityType
+}
 func (a activityItem) name() string {
 	return firstNonEmpty(a.ActivityName, a.Name, a.Title, "未命名课时")
 }
@@ -75,7 +105,7 @@ func (ci *Classin) extractCourseTree(c *util.Client, in ids, headers map[string]
 	// emit every course the member can see.
 	var selected []courseItem
 	for _, course := range courses {
-		if in.CourseID == "" || course.CourseID == in.CourseID {
+		if in.CourseID == "" || course.id() == in.CourseID {
 			selected = append(selected, course)
 		}
 	}
@@ -85,7 +115,7 @@ func (ci *Classin) extractCourseTree(c *util.Client, in ids, headers map[string]
 
 	var entries []*extractor.MediaInfo
 	for _, course := range selected {
-		sid := firstNonEmpty(course.SchoolUID, in.SID)
+		sid := firstNonEmpty(course.sid(), in.SID)
 		node := ci.buildCourseEntry(c, sid, course, headers, auth)
 		if node != nil {
 			entries = append(entries, node)
@@ -101,17 +131,23 @@ func (ci *Classin) extractCourseTree(c *util.Client, in ids, headers map[string]
 }
 
 func (ci *Classin) buildCourseEntry(c *util.Client, sid string, course courseItem, headers map[string]string, auth classinAuth) *extractor.MediaInfo {
-	title := util.SanitizeFilename(firstNonEmpty(course.CourseName, "ClassIn课程"))
-	categories := listCategories(c, sid, course.CourseID, auth)
+	title := util.SanitizeFilename(course.title())
+	courseID := course.id()
+	categories := listCategories(c, sid, courseID, auth)
 
 	var children []*extractor.MediaInfo
 	if len(categories) == 0 {
-		// No category layer: enumerate units with an empty categoryId.
-		children = append(children, ci.buildUnitEntries(c, sid, course.CourseID, "", headers, auth)...)
+		// No category layer: first enumerate units with an empty categoryId; if
+		// the LMS has no unit tree (older ClassIn records), fall back to
+		// getuserRecordclasses, matching _build_legacy_record_infos.
+		children = append(children, ci.buildUnitEntries(c, sid, courseID, "", headers, auth)...)
+		if len(children) == 0 {
+			children = append(children, ci.buildLegacyRecordEntries(c, sid, courseID, title, headers, auth)...)
+		}
 	} else {
 		for _, cat := range categories {
 			catName := firstNonEmpty(cat.Name, cat.CategoryName, cat.Title)
-			units := ci.buildUnitEntries(c, sid, course.CourseID, cat.CategoryID, headers, auth)
+			units := ci.buildUnitEntries(c, sid, courseID, cat.id(), headers, auth)
 			if len(units) == 0 {
 				continue
 			}
@@ -127,6 +163,9 @@ func (ci *Classin) buildCourseEntry(c *util.Client, sid string, course courseIte
 		}
 	}
 	if len(children) == 0 {
+		children = append(children, ci.buildLegacyRecordEntries(c, sid, courseID, title, headers, auth)...)
+	}
+	if len(children) == 0 {
 		return nil
 	}
 	if len(children) == 1 {
@@ -138,11 +177,44 @@ func (ci *Classin) buildCourseEntry(c *util.Client, sid string, course courseIte
 	return &extractor.MediaInfo{Site: "classin", Title: title, Entries: children}
 }
 
+func (ci *Classin) buildLegacyRecordEntries(c *util.Client, sid, courseID, title string, headers map[string]string, auth classinAuth) []*extractor.MediaInfo {
+	var out []*extractor.MediaInfo
+	records := listUserRecordClasses(c, sid, courseID, auth)
+	for i, record := range records {
+		classID := firstNonEmpty(textValue(record, "client_class_id", "clientClassId", "classId"), textValue(record, "bizId", "recordId"))
+		if classID == "" {
+			continue
+		}
+		name := firstNonEmpty(
+			textValue(record, "class_name", "className", "lessonName", "course_name", "courseName", "name", "title"),
+			fmt.Sprintf("ClassIn record %02d", i+1),
+		)
+		act := activityItem{
+			ActivityID:   classID,
+			BizID:        classID,
+			ClassID:      classID,
+			ActivityName: name,
+			Type:         4,
+		}
+		entries := resolveVideoActivity(c, firstNonEmpty(textValue(record, "school_uid", "schoolUid"), sid), firstNonEmpty(textValue(record, "client_course_id", "clientCourseId"), courseID), act, headers, auth)
+		if len(entries) == 0 {
+			continue
+		}
+		if len(entries) == 1 {
+			out = append(out, entries[0])
+			continue
+		}
+		out = append(out, &extractor.MediaInfo{Site: "classin", Title: util.SanitizeFilename(name), Entries: entries})
+	}
+	return out
+}
+
 func (ci *Classin) buildUnitEntries(c *util.Client, sid, courseID, categoryID string, headers map[string]string, auth classinAuth) []*extractor.MediaInfo {
 	units, uuid := listUnits(c, sid, courseID, categoryID, auth)
 	var out []*extractor.MediaInfo
 	for _, unit := range units {
-		acts := listUnitActivities(c, sid, courseID, unit.UnitID, uuid, auth)
+		unitID := unit.id()
+		acts := listUnitActivities(c, sid, courseID, categoryID, unitID, uuid, auth)
 		entries := ci.resolveActivities(c, sid, courseID, acts, headers, auth)
 		if len(entries) == 0 {
 			continue
@@ -164,7 +236,7 @@ func (ci *Classin) buildUnitEntries(c *util.Client, sid, courseID, categoryID st
 func (ci *Classin) resolveActivities(c *util.Client, sid, courseID string, acts []activityItem, headers map[string]string, auth classinAuth) []*extractor.MediaInfo {
 	var out []*extractor.MediaInfo
 	for _, act := range acts {
-		switch act.Type {
+		switch act.kind() {
 		case 4, 5:
 			out = append(out, resolveVideoActivity(c, sid, courseID, act, headers, auth)...)
 		case 1:
@@ -181,8 +253,8 @@ func (ci *Classin) resolveActivities(c *util.Client, sid, courseID string, acts 
 func resolveVideoActivity(c *util.Client, sid, courseID string, act activityItem, headers map[string]string, auth classinAuth) []*extractor.MediaInfo {
 	title := util.SanitizeFilename(act.name())
 	forms := []map[string]string{
-		{"getStuStatistic": "1", "activityId": firstNonEmpty(act.ActivityID, act.BizID), "courseId": courseID, "classRole": "1", "clusterRole": "0", "SID": sid},
-		{"flag": "1", "memberUid": auth.normalized().UID, "clientClassId": firstNonEmpty(act.BizID, act.ClassID, act.ActivityID), "clientCourseId": courseID, "SID": sid},
+		{"getStuStatistic": "1", "activityId": act.id(), "courseId": courseID, "classRole": "1", "clusterRole": "0", "SID": sid},
+		{"flag": "1", "memberUid": auth.normalized().UID, "clientClassId": act.classID(), "clientCourseId": courseID, "SID": sid},
 	}
 	var plays []playable
 	for _, form := range forms {
@@ -210,7 +282,7 @@ func formAPIForVideo(form map[string]string) string {
 // activity. homework/get returns file arrays under docs/image/audio/video and
 // their th* mirrors; each fileId is resolved to a CDN URL via file/getDownInfo.
 func resolveHomeworkActivity(c *util.Client, sid, courseID string, act activityItem, headers map[string]string, auth classinAuth) []*extractor.MediaInfo {
-	activityID := firstNonEmpty(act.ActivityID, act.BizID)
+	activityID := act.id()
 	if activityID == "" {
 		return nil
 	}
@@ -321,11 +393,12 @@ func listCourses(c *util.Client, auth classinAuth) []courseItem {
 		}
 		items := decodeList[courseItem](env.Data)
 		for _, it := range items {
-			if it.CourseID != "" && seen[it.CourseID] {
+			id := it.id()
+			if id != "" && seen[id] {
 				continue
 			}
-			if it.CourseID != "" {
-				seen[it.CourseID] = true
+			if id != "" {
+				seen[id] = true
 			}
 			out = append(out, it)
 		}
@@ -363,21 +436,38 @@ func listUnits(c *util.Client, sid, courseID, categoryID string, auth classinAut
 	return units, holder.UUID
 }
 
-func listUnitActivities(c *util.Client, sid, courseID, unitID, uuid string, auth classinAuth) []activityItem {
+func listUnitActivities(c *util.Client, sid, courseID, categoryID, unitID, uuid string, auth classinAuth) []activityItem {
 	if unitID == "" {
 		return nil
 	}
 	// unitIds is sent as a bracketed string ("[id]"), the form the ClassIn app
 	// uses; uuid pins the studentUnitList response the ids came from.
-	data := mergeMap(courseFilterPayload(sid, courseID, "", auth), map[string]string{
-		"unitIds": "[" + unitID + "]",
-		"uuid":    uuid,
-	})
-	env, err := postFormMap(c, urlUnitActivity, data, auth)
-	if err != nil || !env.ok() || len(env.Data) == 0 {
-		return nil
+	payloads := []map[string]string{
+		mergeMap(courseFilterPayload(sid, courseID, categoryID, auth), map[string]string{
+			"unitIds": "[" + unitID + "]",
+			"uuid":    uuid,
+		}),
+		mergeMap(courseFilterPayload(sid, courseID, categoryID, auth), map[string]string{
+			"unitIds": unitID,
+			"uuid":    uuid,
+		}),
 	}
-	return decodeList[activityItem](env.Data)
+	seen := map[string]bool{}
+	for _, data := range payloads {
+		key := stableFormKey(data)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		env, err := postFormMap(c, urlUnitActivity, data, auth)
+		if err != nil || !env.ok() || len(env.Data) == 0 {
+			continue
+		}
+		if items := decodeList[activityItem](env.Data); len(items) > 0 {
+			return items
+		}
+	}
+	return nil
 }
 
 // courseFilterPayload mirrors _build_course_filter_payload: the constant student
@@ -549,4 +639,128 @@ func jsonBody(data map[string]string) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+func listUserRecordClasses(c *util.Client, sid, courseID string, auth classinAuth) []map[string]any {
+	if courseID == "" {
+		return nil
+	}
+	var out []map[string]any
+	seen := map[string]bool{}
+	lastClassID := ""
+	for page := 0; page < 50; page++ {
+		data := map[string]string{
+			"clientCourseId": courseID,
+			"UID":            auth.normalized().UID,
+		}
+		if sid != "" {
+			data["schoolUid"] = sid
+		}
+		if lastClassID != "" {
+			data["clientClassId"] = lastClassID
+		}
+		env, err := postFormMap(c, urlUserRecords, data, auth)
+		if err != nil || !env.ok() || len(env.Data) == 0 {
+			break
+		}
+		items := decodeList[map[string]any](env.Data)
+		if len(items) == 0 {
+			break
+		}
+		var added int
+		nextClassID := ""
+		for _, item := range items {
+			if cid := firstNonEmpty(textValue(item, "client_course_id", "clientCourseId"), courseID); cid != "" && cid != courseID {
+				continue
+			}
+			if itemSID := textValue(item, "school_uid", "schoolUid"); sid != "" && itemSID != "" && itemSID != sid {
+				continue
+			}
+			classID := firstNonEmpty(textValue(item, "client_class_id", "clientClassId", "classId"), textValue(item, "bizId", "recordId"))
+			if classID == "" {
+				continue
+			}
+			nextClassID = classID
+			if seen[classID] {
+				continue
+			}
+			seen[classID] = true
+			out = append(out, item)
+			added++
+		}
+		if !hasMoreClassin(env.Data) || nextClassID == "" || nextClassID == lastClassID || added == 0 {
+			break
+		}
+		lastClassID = nextClassID
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		bi, bj := classinIntValue(out[i], "class_btime", "classBtime"), classinIntValue(out[j], "class_btime", "classBtime")
+		if bi != bj {
+			return bi < bj
+		}
+		return classinIntValue(out[i], "classId", "client_class_id", "clientClassId") < classinIntValue(out[j], "classId", "client_class_id", "clientClassId")
+	})
+	return out
+}
+
+func hasMoreClassin(data json.RawMessage) bool {
+	var holder map[string]any
+	if err := json.Unmarshal(data, &holder); err != nil {
+		return false
+	}
+	return classinBoolValue(holder, "has_more", "hasMore")
+}
+
+func classinBoolValue(m map[string]any, keys ...string) bool {
+	for _, k := range keys {
+		switch v := m[k].(type) {
+		case bool:
+			return v
+		case float64:
+			return v != 0
+		case string:
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "1", "true", "yes", "ok":
+				return true
+			case "0", "false", "no", "":
+				return false
+			}
+		}
+	}
+	return false
+}
+
+func classinIntValue(m map[string]any, keys ...string) int {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			switch x := v.(type) {
+			case float64:
+				return int(x)
+			case int:
+				return x
+			case int64:
+				return int(x)
+			case json.Number:
+				n, _ := strconv.Atoi(x.String())
+				return n
+			case string:
+				n, _ := strconv.Atoi(strings.TrimSpace(x))
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+func stableFormKey(m map[string]string) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+m[k])
+	}
+	return strings.Join(parts, "&")
 }

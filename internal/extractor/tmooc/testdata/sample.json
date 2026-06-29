@@ -11,7 +11,9 @@
   },
   "login": {
     "code": 0,
-    "data": {}
+    "data": {
+      "token": "mock-token"
+    }
   },
   "outline": {
     "data": {
@@ -28,6 +30,10 @@
                     {
                       "videoId": "vid-1",
                       "videoName": "Tmooc Mock Lesson"
+                    },
+                    {
+                      "videoId": "vid-2",
+                      "videoName": "Tmooc Mock Lesson 2"
                     }
                   ]
                 }
@@ -41,6 +47,11 @@
   "video_play": {
     "data": {
       "playUrl": "https://cdn.example.com/tmooc.mp4"
+    }
+  },
+  "video_play_2": {
+    "data": {
+      "playUrl": "https://cdn.example.com/tmooc2.m3u8"
     }
   }
 }

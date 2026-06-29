@@ -19,11 +19,11 @@ func entriesFromMap(a *apiClient, item map[string]any, fallbackTitle string) []*
 		}
 	}
 	for i, material := range iterMaterialCandidates(item) {
-		if entry := fileEntry(material, i+1, fallbackTitle); entry != nil {
+		if entry := fileEntry(a, material, i+1, fallbackTitle); entry != nil {
 			out = append(out, entry)
 		}
 	}
-	if hasVideoHint(item) || findMediaURL(item) != "" || textValue(extractCoursewareInfo(item), "coursewareId") != "" {
+	if hasVideoHint(item) || findMediaURL(item) != "" || textValue(extractCoursewareInfo(item), "coursewareId") != "" || hasProviderVideoHint(item) {
 		if entry, err := mediaFromMap(a, item, fallbackTitle); err == nil {
 			out = append(out, entry)
 		} else if b, ok := asBlocked(err); ok {
@@ -34,7 +34,7 @@ func entriesFromMap(a *apiClient, item map[string]any, fallbackTitle string) []*
 }
 
 func hasDownloadableResource(item map[string]any) bool {
-	return hasArticleHint(item) || looksLikeFileInfo(item) || hasVideoHint(item) || textValue(extractCoursewareInfo(item), "coursewareId") != ""
+	return hasArticleHint(item) || looksLikeFileInfo(item) || hasVideoHint(item) || hasProviderVideoHint(item) || textValue(extractCoursewareInfo(item), "coursewareId") != ""
 }
 
 func hasVideoHint(item map[string]any) bool {
@@ -42,6 +42,9 @@ func hasVideoHint(item map[string]any) bool {
 		return true
 	}
 	if textValue(extractCoursewareInfo(item), "coursewareId") != "" {
+		return true
+	}
+	if hasProviderVideoHint(item) {
 		return true
 	}
 	for _, key := range []string{"videoId", "video_id", "coursewareId", "courseWareId", "contentId", "lessonId", "lesson_id", "bizId"} {
@@ -131,6 +134,11 @@ func buildArticleHTML(title string, article map[string]any) string {
 	}
 	body := firstNonEmpty(textValue(article, "content"), textValue(article, "body"), textValue(article, "richText"), textValue(article, "html"), textValue(article, "intro"), textValue(article, "text"))
 	if body == "" {
+		if intro := htmlFromIntroList(article["introList"]); intro != "" {
+			body = intro
+		}
+	}
+	if body == "" {
 		body = "<p>暂无图文内容</p>"
 	} else if !strings.Contains(strings.ToLower(body), "<p") && !strings.Contains(strings.ToLower(body), "<div") && !strings.Contains(strings.ToLower(body), "<img") {
 		body = "<p>" + html.EscapeString(body) + "</p>"
@@ -138,6 +146,37 @@ func buildArticleHTML(title string, article map[string]any) string {
 	parts = append(parts, body)
 	escapedTitle := html.EscapeString(firstNonEmpty(title, "未命名图文"))
 	return "<!doctype html><html><head><meta charset=\"utf-8\"><title>" + escapedTitle + "</title></head><body><h1>" + escapedTitle + "</h1>" + strings.Join(parts, "\n") + "</body></html>"
+}
+
+func htmlFromIntroList(value any) string {
+	var parts []string
+	var walk func(any)
+	walk = func(value any) {
+		switch x := value.(type) {
+		case string:
+			if strings.TrimSpace(x) != "" {
+				if strings.Contains(strings.ToLower(x), "<img") || strings.Contains(strings.ToLower(x), "<p") || strings.Contains(strings.ToLower(x), "<div") {
+					parts = append(parts, x)
+				} else if looksMediaURL(x) || isImageURL(x) {
+					parts = append(parts, `<p><img src="`+html.EscapeString(normalizeMediaURL(x))+`"></p>`)
+				} else {
+					parts = append(parts, "<p>"+html.EscapeString(x)+"</p>")
+				}
+			}
+		case []any:
+			for _, item := range x {
+				walk(item)
+			}
+		case map[string]any:
+			if img := firstNonEmpty(textValue(x, "imgUrl", "imageUrl", "imageURL", "picUrl", "picURL", "url", "src")); img != "" && (isImageURL(img) || textValue(x, "type") == "image") {
+				parts = append(parts, `<p><img src="`+html.EscapeString(normalizeMediaURL(img))+`"></p>`)
+			} else if text := firstNonEmpty(textValue(x, "text", "content", "html", "value", "title")); text != "" {
+				walk(text)
+			}
+		}
+	}
+	walk(value)
+	return strings.Join(parts, "\n")
 }
 
 func iterMaterialCandidates(item map[string]any) []map[string]any {
@@ -154,6 +193,12 @@ func iterMaterialCandidates(item map[string]any) []map[string]any {
 			}
 			for _, key := range []string{"materials", "materialList", "coursewareList", "resourceList", "resources", "attachments", "attachmentList", "files", "fileList", "docs", "docList"} {
 				if nested, ok := x[key]; ok {
+					walk(nested, depth+1)
+				}
+			}
+			for _, nested := range x {
+				switch nested.(type) {
+				case map[string]any, []any:
 					walk(nested, depth+1)
 				}
 			}
@@ -196,10 +241,38 @@ func isMaterialURL(fileURL string) bool {
 	return strings.Contains(lower, "/file/") || strings.Contains(lower, "/files/") || strings.Contains(lower, "/resource/") || strings.Contains(lower, "/download/")
 }
 
-func fileEntry(item map[string]any, index int, fallbackTitle string) *extractor.MediaInfo {
-	fileURL := normalizeMediaURL(firstNonEmpty(textValue(item, "fileUrl", "fileURL", "resourceUrl", "resourceURL", "materialUrl", "attachUrl", "downloadUrl", "url")))
+func isImageURL(raw string) bool {
+	lower := strings.ToLower(strings.TrimSpace(raw))
+	for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"} {
+		if strings.Contains(lower, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeFileURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "//") || strings.HasPrefix(raw, "/") {
+		return normalizeMediaURL(raw)
+	}
+	if strings.Contains(raw, "/") && !strings.Contains(raw, "://") {
+		return strings.TrimRight(CCTALK_OCS_MATERIAL_HOST, "/") + "/" + strings.TrimLeft(raw, "/")
+	}
+	return normalizeMediaURL(raw)
+}
+
+func fileEntry(a *apiClient, item map[string]any, index int, fallbackTitle string) *extractor.MediaInfo {
+	fileURL := normalizeFileURL(firstNonEmpty(textValue(item, "fileUrl", "fileURL", "resourceUrl", "resourceURL", "materialUrl", "attachUrl", "downloadUrl", "url", "path", "filePath", "resourcePath")))
 	if fileURL == "" {
 		return nil
+	}
+	headers := baseHeaders()
+	if a != nil && a.headers != nil {
+		headers = a.headers
 	}
 	rawTitle := firstNonEmpty(textValue(item, "fileName", "file_name", "resourceName", "materialName", "attachName", "title", "name", "contentTitle", "coursewareName"), fallbackTitle, "资料")
 	ext := guessFileExt(rawTitle, fileURL)
@@ -211,7 +284,7 @@ func fileEntry(item map[string]any, index int, fallbackTitle string) *extractor.
 		Site:  "cctalk",
 		Title: title,
 		Streams: map[string]extractor.Stream{
-			"file": {Quality: "file", URLs: []string{fileURL}, Format: ext, Size: int64Value(item["fileSize"], item["size"], item["totalSize"]), Headers: baseHeaders()},
+			"file": {Quality: "file", URLs: []string{fileURL}, Format: ext, Size: int64Value(item["fileSize"], item["size"], item["totalSize"]), Headers: headers},
 		},
 		Extra: map[string]any{"type": "file", "file_url": fileURL, "file_name": rawTitle, "raw": item},
 	}

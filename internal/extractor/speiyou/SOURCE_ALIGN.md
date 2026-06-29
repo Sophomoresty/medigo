@@ -15,8 +15,10 @@
 | 源码方法 (line) | Go 函数 | method | 一致? |
 |---|---|---|---|
 | `_request_json` 57-80 | `requestJSON` | GET | ✓ |
-| `_get_subjects` 332-340 | `Extract` subject probe | GET | ✓ |
+| `_check_cookie` / `_valid_subject_response` | `validateSpeiyouLogin` + `validSubjectResponse` | GET | ✓ |
+| `_get_subjects` 332-340 | `validateSpeiyouLogin` + `speiyouSubjectCandidates` | GET | ✓ |
 | `_get_live_list` 241-271 | `fetchLiveList` | GET | ✓ |
+| `_group_live_courses` 191-239 | `groupLiveCourses` + `mergeCourseGroups` | map/reduce | ✓ |
 | `_get_legacy_course_list` 345-389 | `fetchCourseAndLessons` | GET | ✓ |
 | `_get_legacy_live_list` 555-574 | `fetchLegacyLessons` | GET | ✓ |
 | `_merge_auth_info` 702-771 | `resolveVideo` / `mergeAuthInfo` | GET | ✓ |
@@ -29,9 +31,17 @@
 | `data/list/result/records` | `jsonToMaps` | ✓ |
 | `stdCourseId/course_id/courseId` | `courseKey` | ✓ |
 | `liveId/live_id` | `lessonKey` | ✓ |
-| `initData.live/course/classInfo/teacher` | `mergeAuthInfo` | ✓ |
-| `videoUrls[]` / `videoUrl` | `resolveVideo` | ✓ |
+| `stdSubject` subject list | `speiyouSubjectCandidates` | ✓ |
+| `price/salePrice/sellPrice/coursePrice/activityPrice/actualPrice/originPrice/originalPrice/amount/money` | `extractPrice` | ✓ |
+| `initData.live/course/classInfo/teacher/teacherList` | `mergeAuthInfo` | ✓ |
+| `videoUrls[]` / `videoUrl` / nested `data.videoUrls` | `resolveVideo` | ✓ |
 | playback headers `liveType`, `stdClassId`, `stdSubject`, `stdCourseId`, `liveId`, `stuId`, `token` | `playbackHeaders` | ✓ |
+
+## 文件下载
+
+| 源码方法 | Go 对应 | 说明 |
+|---|---|---|
+| `_download_files` | 无资料条目生成 | Python 固定返回 `False`, 该站点仅生成课程视频条目 |
 
 ## 阻塞步骤
 

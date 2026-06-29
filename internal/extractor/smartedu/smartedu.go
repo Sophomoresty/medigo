@@ -29,11 +29,17 @@ const (
 
 	nationalResourceDetailURL            = "%s/ndrv2/national_lesson/resources/details/%s.json"
 	nationalRelationResourceURL          = "%s/ndrs/national_lesson/resources/%s/relation_resource.json"
+	nationalTeachingmaterialDetailURL    = "%s/ndrs/national_lesson/teachingmaterials/details/%s.json"
+	nationalTeachingmaterialPartsURL     = "%s/ndrs/national_lesson/teachingmaterials/version/data_version.json"
 	nationalTeachingmaterialResourcesURL = "%s/ndrs/national_lesson/teachingmaterials/%s/resources/parts.json"
+	nationalTreeURL                      = "%s/ndrv2/national_lesson/trees/%s.json"
 	prepareResourceDetailURL             = "%s/ndrv2/prepare_lesson/resources/details/%s.json"
 	prepareSubTypeResourceDetailURL      = "%s/ndrv2/prepare_sub_type/resources/details/%s.json"
 	prepareRelationResourceURL           = "%s/ndrs/prepare_lesson/resources/%s/relation_resource.json"
+	prepareTeachingmaterialDetailURL     = "%s/ndrs/prepare_lesson/teachingmaterials/details/%s.json"
+	prepareTeachingmaterialPartsURL      = "%s/ndrs/prepare_lesson/teachingmaterials/parts.json"
 	prepareTeachingmaterialResourcesURL  = "%s/ndrs/prepare_lesson/teachingmaterials/%s/resources/parts.json"
+	prepareTreeURL                       = "%s/ndrs/prepare_lesson/trees/%s.json"
 	tchMaterialDetailURL                 = "%s/ndrv2/resources/tch_material/details/%s.json"
 	tchMaterialContentURL                = "%s/api_static/contents/%s.json"
 	tchMaterialThematicDetailURL         = "%s/ndrs/special_edu/resources/details/%s.json"
@@ -57,12 +63,14 @@ type smCtx struct {
 	accessToken, refreshToken string
 	macKey                    string
 	diff                      int64
+	lastVideoKeySign          string
 }
 
 type sourceItem struct {
 	kind, url, fmt, name, title, id string
 	headers                         map[string]string
 	size                            int64
+	extra                           map[string]any
 }
 
 type smarteduAuth struct {
@@ -84,10 +92,13 @@ func (s *Smartedu) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 	q := u.Query()
 	p := strings.TrimRight(u.Path, "/")
 	var sources []sourceItem
+	var chapters []extractor.Chapter
+	extra := map[string]any{"price": 0, "purchased": true, "login_checked": ctx.macKey != ""}
 	title := "smartedu"
 
 	switch p {
 	case "/tchMaterial/detail":
+		extra["link_type"] = "tch_material"
 		contentID := firstQuery(q, "contentId", "contentid")
 		if contentID == "" {
 			return nil, fmt.Errorf("smartedu: missing contentId")
@@ -112,7 +123,10 @@ func (s *Smartedu) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 	case "/syncClassroom", "/syncClassroom/classActivity":
 		activityID := firstQuery(q, "activityId", "activityid")
 		fromPrepare := firstQuery(q, "fromPrepare", "fromprepare") == "1"
+		extra["from_prepare"] = fromPrepare
 		if activityID != "" {
+			extra["link_type"] = "sync_classroom"
+			extra["activity_id"] = activityID
 			detail, err := ctx.loadActivity(activityID, fromPrepare)
 			if err != nil {
 				return nil, err
@@ -120,18 +134,25 @@ func (s *Smartedu) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 			sources = ctx.extractResources(detail, activityID, true, fromPrepare, "")
 			title = firstNonEmpty(globalTitle(detail), activityID)
 		} else {
+			extra["link_type"] = "sync_classroom_course"
 			teachingID := firstQuery(q, "teachingmaterialId", "teachingmaterialid")
+			if teachingID == "" {
+				teachingID = ctx.findTeachingMaterialByTags(smarteduDefaultTags(q), fromPrepare)
+			}
 			if teachingID == "" {
 				return nil, fmt.Errorf("smartedu: missing activityId or teachingmaterialId")
 			}
-			resources, err := ctx.loadTeachingResources(teachingID)
+			extra["teachingmaterial_id"] = teachingID
+			resources, err := ctx.loadTeachingResourcesKind(teachingID, fromPrepare)
 			if err != nil {
 				return nil, err
 			}
-			sources = ctx.extractSources(resources, true, false, "")
-			title = teachingID
+			chapters = chaptersFromSmarteduTree(ctx.loadTeachingTree(teachingID, fromPrepare))
+			sources = ctx.extractSources(resources, true, fromPrepare, "")
+			title = firstNonEmpty(ctx.loadTeachingTitle(teachingID, fromPrepare), teachingID)
 		}
 	default:
+		extra["link_type"] = "resource"
 		resourceID := firstQuery(q, "activityId", "activityid", "contentId", "contentid", "resourceId", "resourceid")
 		if resourceID == "" {
 			return nil, fmt.Errorf("smartedu: unsupported URL path %s", p)
@@ -143,7 +164,20 @@ func (s *Smartedu) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 		sources = ctx.extractResources(detail, resourceID, true, false, "")
 		title = firstNonEmpty(globalTitle(detail), resourceID)
 	}
-	return mediaFromSources(title, sources)
+	info, err := mediaFromSources(title, sources)
+	if err != nil {
+		return nil, err
+	}
+	if len(chapters) > 0 {
+		info.Chapters = chapters
+	}
+	if info.Extra == nil {
+		info.Extra = map[string]any{}
+	}
+	for k, v := range extra {
+		info.Extra[k] = v
+	}
+	return info, nil
 }
 
 func newCtx(jar http.CookieJar) *smCtx {
@@ -239,11 +273,81 @@ func (x *smCtx) loadRelation(id string, prepare bool) []map[string]any {
 }
 
 func (x *smCtx) loadTeachingResources(id string) ([]map[string]any, error) {
-	m, err := x.getFirst(tplURLs(nationalTeachingmaterialResourcesURL, staticBases(), id))
+	return x.loadTeachingResourcesKind(id, false)
+}
+
+func (x *smCtx) loadTeachingResourcesKind(id string, prepare bool) ([]map[string]any, error) {
+	tpl, bases := nationalTeachingmaterialResourcesURL, staticBases()
+	if prepare {
+		tpl, bases = prepareTeachingmaterialResourcesURL, specialBases()
+	}
+	m, err := x.getFirst(tplURLs(tpl, bases, id))
 	if err != nil {
 		return nil, err
 	}
 	return collectResourceMaps(m), nil
+}
+
+func (x *smCtx) loadTeachingTitle(id string, prepare bool) string {
+	tpl, bases := nationalTeachingmaterialDetailURL, staticBases()
+	if prepare {
+		tpl, bases = prepareTeachingmaterialDetailURL, specialBases()
+	}
+	m, err := x.getFirst(tplURLs(tpl, bases, id))
+	if err != nil {
+		return ""
+	}
+	return globalTitle(m)
+}
+
+func (x *smCtx) loadTeachingTree(id string, prepare bool) any {
+	tpl, bases := nationalTreeURL, staticBases()
+	if prepare {
+		tpl, bases = prepareTreeURL, specialBases()
+	}
+	m, err := x.getFirst(tplURLs(tpl, bases, id))
+	if err != nil {
+		return nil
+	}
+	return m
+}
+
+func (x *smCtx) findTeachingMaterialByTags(tags []string, prepare bool) string {
+	if len(tags) == 0 {
+		return ""
+	}
+	tpl, bases := nationalTeachingmaterialPartsURL, staticBases()
+	if prepare {
+		tpl, bases = prepareTeachingmaterialPartsURL, specialBases()
+	}
+	urls := make([]string, 0, len(bases))
+	for _, b := range bases {
+		urls = append(urls, fmt.Sprintf(tpl, b))
+	}
+	m, err := x.getFirst(urls)
+	if err != nil {
+		return ""
+	}
+	want := map[string]bool{}
+	for _, tag := range tags {
+		if tag = strings.TrimSpace(tag); tag != "" {
+			want[tag] = true
+		}
+	}
+	for _, item := range collectResourceMaps(m) {
+		have := tagSet(item)
+		ok := len(want) > 0
+		for tag := range want {
+			if !have[tag] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return str(item["id"])
+		}
+	}
+	return ""
 }
 
 func (x *smCtx) loadTchMaterialThematic(id string) ([]map[string]any, error) {
@@ -295,14 +399,23 @@ func (x *smCtx) sourceFromResource(r map[string]any, idx int, contentType string
 	if it := selectVideoItem(r); it != nil {
 		fmtv := strings.ToLower(firstNonEmpty(str(it["ti_format"]), extFormat(itemURL(it))))
 		u := x.withAccess(itemURL(it))
-		return sourceItem{kind: "video", url: u, fmt: firstNonEmpty(fmtv, "m3u8"), name: fmt.Sprintf("(%d)--%s", idx, title), title: title, id: id, headers: x.requestHeaders(u, true), size: itemSize(it)}
+		headers := x.requestHeaders(u, true)
+		extra := map[string]any{"source_url": u}
+		if isM3U8URL(u, fmtv) {
+			if dataURL, manifest, err := x.prepareM3U8(u); err == nil && dataURL != "" {
+				extra["m3u8_text"] = manifest
+				u = dataURL
+				fmtv = "m3u8"
+			}
+		}
+		return sourceItem{kind: "video", url: u, fmt: firstNonEmpty(fmtv, "m3u8"), name: fmt.Sprintf("(%d)--%s", idx, title), title: title, id: id, headers: headers, size: itemSize(it), extra: extra}
 	}
 	if it := selectFileItem(r); it != nil {
 		u := x.withAccess(itemURL(it))
 		if contentType == "thematic_course" && str(it["ti_file_flag"]) == "source" {
 			u = privateToPublic(u)
 		}
-		return sourceItem{kind: "file", url: u, fmt: strings.ToLower(firstNonEmpty(str(it["ti_format"]), extFormat(u))), name: fmt.Sprintf("(%d)--%s", idx, title), title: title, id: id, headers: x.requestHeaders(u, true), size: itemSize(it)}
+		return sourceItem{kind: "file", url: u, fmt: strings.ToLower(firstNonEmpty(str(it["ti_format"]), extFormat(u))), name: fmt.Sprintf("(%d)--%s", idx, title), title: title, id: id, headers: x.requestHeaders(u, true), size: itemSize(it), extra: map[string]any{"source_url": u}}
 	}
 	return sourceItem{}
 }
@@ -336,7 +449,11 @@ func mediaFromSources(title string, srcs []sourceItem) (*extractor.MediaInfo, er
 		if format == "m3u8" {
 			stream.NeedMerge = true
 		}
-		return &extractor.MediaInfo{Site: "smartedu", Title: src.name, Streams: map[string]extractor.Stream{"default": stream}, Extra: map[string]any{"id": src.id, "kind": src.kind, "title": src.title}}
+		extra := map[string]any{"id": src.id, "kind": src.kind, "title": src.title}
+		for k, v := range src.extra {
+			extra[k] = v
+		}
+		return &extractor.MediaInfo{Site: "smartedu", Title: src.name, Streams: map[string]extractor.Stream{"default": stream}, Extra: extra}
 	}
 
 	if len(srcs) == 1 {
@@ -349,4 +466,48 @@ func mediaFromSources(title string, srcs []sourceItem) (*extractor.MediaInfo, er
 		entries = append(entries, mk(src))
 	}
 	return &extractor.MediaInfo{Site: "smartedu", Title: title, Entries: entries}, nil
+}
+
+func smarteduDefaultTags(q url.Values) []string {
+	raw := firstQuery(q, "defaultTag", "defaulttag")
+	if raw == "" {
+		return nil
+	}
+	if decoded, err := url.QueryUnescape(raw); err == nil {
+		raw = decoded
+	}
+	parts := strings.Split(raw, "/")
+	tags := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			tags = append(tags, part)
+		}
+	}
+	return tags
+}
+
+func chaptersFromSmarteduTree(v any) []extractor.Chapter {
+	var chapters []extractor.Chapter
+	seen := map[string]bool{}
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case []any:
+			for _, item := range t {
+				walk(item)
+			}
+		case map[string]any:
+			id := str(t["id"])
+			title := firstNonEmpty(globalTitle(t), str(t["rich_title"]), id)
+			if id != "" && title != "" && !seen[id] {
+				seen[id] = true
+				chapters = append(chapters, extractor.Chapter{Title: title, URL: id, Index: len(chapters) + 1})
+			}
+			for _, key := range []string{"child_nodes", "children"} {
+				walk(t[key])
+			}
+		}
+	}
+	walk(v)
+	return chapters
 }

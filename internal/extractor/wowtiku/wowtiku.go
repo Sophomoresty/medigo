@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,7 +35,10 @@ const (
 	vodRegion        = "cn-shanghai"
 )
 
-var patterns = []string{`(?:[\w-]+\.)?wowtiku\.com/|(?:[\w-]+\.)?wowtiku\.net/`}
+var (
+	patterns      = []string{`(?:[\w-]+\.)?wowtiku\.com/|(?:[\w-]+\.)?wowtiku\.net/`}
+	priceNumberRe = regexp.MustCompile(`-?\d+(?:\.\d+)?`)
+)
 
 func init() {
 	extractor.Register(&Wowtiku{}, extractor.SiteInfo{Name: "Wowtiku", URL: "wowtiku.com", NeedAuth: true})
@@ -46,6 +51,12 @@ func (s *Wowtiku) Patterns() []string { return patterns }
 type wtSession struct{ token string }
 type wtVideo struct{ title, vid, directURL string }
 type wtFile struct{ title, rawURL, format string }
+type wtCourse struct {
+	id, title, platformID string
+	price                 float64
+	purchased             bool
+	raw                   map[string]any
+}
 
 func (s *Wowtiku) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.MediaInfo, error) {
 	if opts == nil || opts.Cookies == nil {
@@ -61,12 +72,17 @@ func (s *Wowtiku) Extract(rawURL string, opts *extractor.ExtractOpts) (*extracto
 		return nil, fmt.Errorf("wowtiku user_info: %w", err)
 	}
 	cid := courseID(rawURL)
+	var selected wtCourse
 	if cid == "" {
-		var err error
-		cid, err = firstCourseID(c, sess)
+		courses, err := purchasedCourses(c, sess)
 		if err != nil {
 			return nil, err
 		}
+		if opts.ListOnly || len(courses) != 1 {
+			return courseListMedia(courses), nil
+		}
+		selected = courses[0]
+		cid = selected.id
 	}
 	detail, err := requestData(c, sess, detailAPI, map[string]string{"id": cid}, nil, "GET", "", "v1")
 	if err != nil {
@@ -112,10 +128,18 @@ func (s *Wowtiku) Extract(rawURL string, opts *extractor.ExtractOpts) (*extracto
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("wowtiku: no playable Aliyun/direct video or downloadable file resolved")
 	}
-	return &extractor.MediaInfo{Site: "wowtiku", Title: detailTitle(detail, cid), Entries: entries}, nil
+	return &extractor.MediaInfo{Site: "wowtiku", Title: detailTitle(detail, cid), Entries: entries, Extra: courseExtra(detail, selected, cid)}, nil
 }
 
 func firstCourseID(c *util.Client, sess wtSession) (string, error) {
+	courses, err := purchasedCourses(c, sess)
+	if err != nil {
+		return "", err
+	}
+	return courses[0].id, nil
+}
+
+func purchasedCourses(c *util.Client, sess wtSession) ([]wtCourse, error) {
 	platforms := []string{"3"}
 	if data, err := requestData(c, sess, platformListsAPI, nil, nil, "GET", "", "v1"); err == nil {
 		for _, m := range mapsUnder(data) {
@@ -125,6 +149,8 @@ func firstCourseID(c *util.Client, sess wtSession) (string, error) {
 		}
 	}
 	seenPlatform := map[string]bool{}
+	seenCourse := map[string]bool{}
+	var courses []wtCourse
 	for _, pid := range platforms {
 		if pid == "" || seenPlatform[pid] {
 			continue
@@ -134,13 +160,64 @@ func firstCourseID(c *util.Client, sess wtSession) (string, error) {
 		if err != nil {
 			continue
 		}
-		for _, m := range mapsUnder(data) {
-			if id := firstNonEmpty(val(m, "id"), val(m, "stage_goods_id")); id != "" {
-				return id, nil
+		for _, m := range courseRows(data) {
+			course := normalizeCourse(m, pid)
+			if course.id == "" || seenCourse[course.id] {
+				continue
 			}
+			seenCourse[course.id] = true
+			courses = append(courses, course)
 		}
 	}
-	return "", fmt.Errorf("wowtiku: purchased course list is empty")
+	if len(courses) == 0 {
+		return nil, fmt.Errorf("wowtiku: purchased course list is empty")
+	}
+	return courses, nil
+}
+
+func courseRows(data any) []map[string]any {
+	rows := listFromAny(data)
+	if len(rows) > 0 {
+		return rows
+	}
+	return mapsUnder(data)
+}
+
+func normalizeCourse(m map[string]any, platformID string) wtCourse {
+	stage := firstMap(firstNonNil(m["stage_goods_info"], m["detail"]))
+	stageFromNested := stage != nil
+	if stage == nil {
+		stage = m
+	}
+	price, _ := coursePrice(m)
+	if price == 0 && stageFromNested {
+		price, _ = coursePrice(stage)
+	}
+	return wtCourse{
+		id:         firstNonEmpty(val(stage, "id"), val(stage, "stage_goods_id"), val(m, "id"), val(m, "stage_goods_id")),
+		title:      firstNonEmpty(val(stage, "name"), val(stage, "title"), val(m, "name"), val(m, "title")),
+		platformID: platformID,
+		price:      price,
+		purchased:  true,
+		raw:        m,
+	}
+}
+
+func courseListMedia(courses []wtCourse) *extractor.MediaInfo {
+	entries := make([]*extractor.MediaInfo, 0, len(courses))
+	for _, course := range courses {
+		extra := map[string]any{"course_id": course.id, "platform_id": course.platformID, "purchased": course.purchased}
+		if course.price > 0 {
+			extra["price"] = course.price
+		} else if course.purchased {
+			extra["price"] = float64(999)
+		}
+		if course.raw != nil {
+			extra["raw"] = course.raw
+		}
+		entries = append(entries, &extractor.MediaInfo{Site: "wowtiku", Title: firstNonEmpty(course.title, course.id), Extra: compactAnyMap(extra)})
+	}
+	return &extractor.MediaInfo{Site: "wowtiku", Title: "wowtiku_courses", Entries: entries}
 }
 
 func requestData(c *util.Client, sess wtSession, path string, params map[string]string, data map[string]string, method, host, version string) (any, error) {
@@ -374,8 +451,34 @@ func firstMap(v any) map[string]any {
 	}
 	return nil
 }
+
+func listFromAny(v any) []map[string]any {
+	switch x := v.(type) {
+	case []any:
+		out := make([]map[string]any, 0, len(x))
+		for _, item := range x {
+			if m, ok := item.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	case map[string]any:
+		for _, key := range []string{"lists", "list", "data", "items", "records", "rows"} {
+			if out := listFromAny(x[key]); len(out) > 0 {
+				return out
+			}
+		}
+	}
+	return nil
+}
+
 func firstMediaURL(m map[string]any) string {
-	return firstURLByKeys(m, "video_url", "play_url", "playUrl", "m3u8_url", "url", "path", "src", "file_url")
+	for _, key := range []string{"video_url", "play_url", "playUrl", "m3u8_url", "url", "path", "src", "file_url"} {
+		if u := val(m, key); (strings.HasPrefix(u, "http") || strings.HasPrefix(u, "//")) && isVideoMediaURL(u) {
+			return u
+		}
+	}
+	return ""
 }
 func firstURLByKeys(v any, keys ...string) string {
 	for _, m := range mapsUnder(v) {
@@ -395,6 +498,83 @@ func detailTitle(data any, cid string) string {
 	}
 	return "wowtiku_" + cid
 }
+
+func courseExtra(detail any, selected wtCourse, cid string) map[string]any {
+	extra := map[string]any{"course_id": firstNonEmpty(cid, selected.id), "purchased": true}
+	if selected.platformID != "" {
+		extra["platform_id"] = selected.platformID
+	}
+	if selected.raw != nil {
+		extra["course"] = selected.raw
+	}
+	if price, ok := coursePrice(detail); ok {
+		extra["price"] = price
+	} else if selected.price > 0 {
+		extra["price"] = selected.price
+	} else {
+		extra["price"] = float64(999)
+	}
+	return compactAnyMap(extra)
+}
+
+func coursePrice(v any) (float64, bool) {
+	centKeys := []string{
+		"priceCent", "priceCents", "price_cent", "price_cents", "priceFen", "price_fen",
+		"moneyCent", "moneyCents", "money_cent", "money_cents", "moneyFen", "money_fen",
+		"amountCent", "amountCents", "amount_cent", "amount_cents",
+	}
+	normalKeys := []string{"price", "salePrice", "sellPrice", "payPrice", "amount", "money", "coursePrice"}
+	for _, m := range mapsUnder(v) {
+		for _, key := range centKeys {
+			if raw, ok := m[key]; ok {
+				if price, ok := normalizePrice(raw, true); ok {
+					return price, true
+				}
+			}
+		}
+		for _, key := range normalKeys {
+			if raw, ok := m[key]; ok {
+				if price, ok := normalizePrice(raw, false); ok {
+					return price, true
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+func normalizePrice(v any, cents bool) (float64, bool) {
+	s := strings.TrimSpace(fmt.Sprint(v))
+	if s == "" || s == "<nil>" {
+		return 0, false
+	}
+	m := priceNumberRe.FindString(strings.ReplaceAll(s, ",", ""))
+	if m == "" {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(m, 64)
+	if err != nil || f <= 0 {
+		return 0, false
+	}
+	if cents || (f >= 1000 && !strings.Contains(m, ".") && !strings.ContainsAny(s, "元¥￥")) {
+		f /= 100
+	}
+	return float64(int(f*100+0.5)) / 100, true
+}
+
+func compactAnyMap(in map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range in {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
+			continue
+		}
+		if v != nil {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 func val(m map[string]any, k string) string {
 	if v, ok := m[k]; ok && v != nil {
 		return strings.TrimSpace(fmt.Sprint(v))
@@ -439,6 +619,15 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstNonNil(vals ...any) any {
+	for _, v := range vals {
+		if v != nil {
+			return v
+		}
+	}
+	return nil
 }
 
 func appendQueryParam(raw, key, value string) string {

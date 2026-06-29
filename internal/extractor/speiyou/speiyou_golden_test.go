@@ -206,4 +206,10 @@ func TestExtractMock(t *testing.T) {
 	if !strings.Contains(got, "cdn.example.com/speiyou.mp4") {
 		t.Fatalf("playable URL %q does not contain expected fixture URL", got)
 	}
+	if info.Extra["purchased"] != true {
+		t.Fatalf("purchased extra = %#v", info.Extra["purchased"])
+	}
+	if info.Extra["price"] != int64(199) {
+		t.Fatalf("price extra = %#v", info.Extra["price"])
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -23,6 +24,7 @@ import (
 var (
 	inputFieldRe = regexp.MustCompile(`(?is)<input\b([^>]*)>`)
 	attrNameRe   = regexp.MustCompile(`(?is)\bname\s*=\s*["']([^"']+)["']`)
+	attrIDRe     = regexp.MustCompile(`(?is)\bid\s*=\s*["']([^"']+)["']`)
 	attrValRe    = regexp.MustCompile(`(?is)\bvalue\s*=\s*["']([^"']*)["']`)
 	ivRe         = regexp.MustCompile(`(?is)IV\s*=\s*(0x[0-9a-fA-F]+)`)
 	keyURIRe     = regexp.MustCompile(`(?is)URI\s*=\s*["']([^"']+)["']`)
@@ -41,6 +43,9 @@ func extractPlayerFields(lectureHTML string) map[string]string {
 		attrs := m[1]
 		nameMatch := attrNameRe.FindStringSubmatch(attrs)
 		if nameMatch == nil {
+			nameMatch = attrIDRe.FindStringSubmatch(attrs)
+		}
+		if nameMatch == nil {
 			continue
 		}
 		name := strings.TrimSpace(nameMatch[1])
@@ -52,7 +57,50 @@ func extractPlayerFields(lectureHTML string) map[string]string {
 			fields[name] = val
 		}
 	}
+	if rt := strings.TrimSpace(fields["rt"]); rt != "" {
+		for _, part := range strings.Split(rt, "&") {
+			if kv := strings.SplitN(part, "=", 2); len(kv) == 2 {
+				fields["rt:"+strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+			}
+		}
+	}
 	return fields
+}
+
+func completePlayerFields(fields map[string]string, headers map[string]string) map[string]string {
+	if fields == nil {
+		fields = map[string]string{}
+	}
+	if strings.TrimSpace(fields["w_id"]) == "" {
+		fields["w_id"] = memberIDFromCookieHeader(headers["Cookie"])
+	}
+	if strings.TrimSpace(fields["w_time"]) == "" {
+		fields["w_time"] = strconv.FormatInt(time.Now().UnixMilli(), 10)
+	}
+	return fields
+}
+
+func memberIDFromCookieHeader(cookieHeader string) string {
+	cookies := cookieMapFromHeader(cookieHeader)
+	if raw := cookies["memberinfo"]; raw != "" {
+		if decoded, err := url.QueryUnescape(raw); err == nil {
+			raw = decoded
+		}
+		var m map[string]any
+		if json.Unmarshal([]byte(raw), &m) == nil {
+			return firstNonEmpty(valueString(m, "uid", "memberId", "member_id", "id"))
+		}
+	}
+	if raw := cookies["dongaoLogin"]; raw != "" {
+		raw += strings.Repeat("=", (4-len(raw)%4)%4)
+		if data, err := base64.StdEncoding.DecodeString(raw); err == nil {
+			var m map[string]any
+			if json.Unmarshal(data, &m) == nil {
+				return firstNonEmpty(valueString(m, "memberId", "uid", "id"))
+			}
+		}
+	}
+	return ""
 }
 
 // dongaoTSKey decrypts the TS segment key. Source _dongao_ts_key:
@@ -122,38 +170,77 @@ func signDongaoMediaURL(rawURL string, fields map[string]string) string {
 	if err != nil {
 		return rawURL
 	}
+	baseSG := u.Query().Get("sg")
+	sg := buildDongaoWP(u.Path, fields)
+	if strings.HasSuffix(strings.ToLower(u.Path), ".ts") && sg != "" {
+		q := u.Query()
+		if baseSG != "" {
+			q.Set("sg", baseSG+"&"+sg)
+		} else {
+			q.Set("sg", sg)
+		}
+		u.RawQuery = q.Encode()
+		return u.String()
+	}
 	q := u.Query()
-	// ccode = time-based nonce
-	q.Set("ccode", strconv.FormatInt(time.Now().UnixMilli(), 10))
-	// w_p derived from wok/w_id/w_time (source uses _build_dongao_w_p)
-	if wok := fields["wok"]; wok != "" {
-		q.Set("wok", wok)
-	}
-	if wid := fields["w_id"]; wid != "" {
-		q.Set("w_id", wid)
-	}
-	if wtime := fields["w_time"]; wtime != "" {
-		q.Set("w_time", wtime)
-	}
-	if wp := buildDongaoWP(fields); wp != "" {
-		q.Set("w_p", wp)
+	if sg != "" {
+		for _, part := range strings.Split(sg, "&") {
+			kv := strings.SplitN(part, "=", 2)
+			if len(kv) == 2 && strings.TrimSpace(kv[0]) != "" {
+				q.Set(kv[0], kv[1])
+			}
+		}
 	}
 	u.RawQuery = q.Encode()
 	return u.String()
 }
 
-func buildDongaoWP(fields map[string]string) string {
-	parts := []string{
-		strings.TrimSpace(fields["wok"]),
-		strings.TrimSpace(fields["w_id"]),
-		strings.TrimSpace(fields["w_time"]),
-		dongaoCDNSignKey,
+func buildDongaoWP(mediaPath string, fields map[string]string) string {
+	uid := strings.TrimSpace(fields["w_id"])
+	wtime := strings.TrimSpace(fields["w_time"])
+	if wtime == "" {
+		wtime = strconv.FormatInt(time.Now().UnixMilli(), 10)
 	}
-	joined := strings.Join(parts, "")
-	if strings.TrimSpace(joined) == dongaoCDNSignKey {
+	sec := dongaoSeconds(wtime)
+	token := firstNonEmpty(strings.TrimSpace(fields["w_auto_p"]), strings.TrimSpace(fields["wok"]), randomDongaoToken(9))
+	if mediaPath == "" || uid == "" {
 		return ""
 	}
-	return fmt.Sprintf("%x", md5.Sum([]byte(joined)))
+	signSource := fmt.Sprintf("%s-%s-%s-0-%s%s", mediaPath, uid, sec, token, dongaoCDNSignKey)
+	sign := fmt.Sprintf("%x", md5.Sum([]byte(signSource)))
+	now := time.Now()
+	ccode := fmt.Sprintf("%d-%08d-%d-%s", now.Unix(), now.Nanosecond()%100000000, now.Nanosecond()%10, token)
+	si := now.Nanosecond() % 1000
+	return fmt.Sprintf("ccode=%s&expire=18000&vkey=%s&u_type=mp4%s&si=%03d&s=%s-%s-0-%s&time=%s&psource=player",
+		url.QueryEscape(ccode), url.QueryEscape(token), dongaoShortToken(token), si, sec, url.QueryEscape(uid), sign, url.QueryEscape(wtime))
+}
+
+func dongaoSeconds(wtime string) string {
+	n, err := strconv.ParseInt(wtime, 10, 64)
+	if err != nil || n <= 0 {
+		return strconv.FormatInt(time.Now().Unix(), 10)
+	}
+	if n > 9999999999 {
+		n /= 1000
+	}
+	return strconv.FormatInt(n, 10)
+}
+
+func dongaoShortToken(token string) string {
+	if len(token) <= 6 {
+		return token
+	}
+	return token[:6]
+}
+
+func randomDongaoToken(n int) string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, n)
+	now := time.Now().UnixNano()
+	for i := range b {
+		b[i] = alphabet[(int(now)+i*17)%len(alphabet)]
+	}
+	return string(b)
 }
 
 // buildSignedM3U8 fetches the signed m3u8, extracts IV from EXT-X-KEY,

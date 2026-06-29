@@ -6,11 +6,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"path"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/Sophomoresty/mediago/internal/extractor"
 )
+
+var envNameUnsafeRe = regexp.MustCompile(`[^A-Za-z0-9]+`)
 
 func extractCoursewareInfo(item any) map[string]any {
 	out := map[string]any{}
@@ -37,9 +42,10 @@ func collectCoursewareInfo(value any, out map[string]any, depth int) {
 			{"videoId", "videoId"}, {"video_id", "videoId"}, {"contentId", "videoId"}, {"content_id", "videoId"},
 			{"tenantId", "tenantId"}, {"tenantID", "tenantId"}, {"tenant_id", "tenantId"},
 			{"sourceType", "sourceType"}, {"source_type", "sourceType"}, {"contentType", "contentType"}, {"content_type", "contentType"},
-			{"userSign", "userSign"}, {"user_sign", "userSign"}, {"userSignKey", "userSign"}, {"user_sign_key", "userSign"}, {"xUserSign", "userSign"}, {"signature", "userSign"}, {"sign", "userSign"},
-			{"videoUrl", "videoUrl"}, {"playUrl", "videoUrl"}, {"m3u8Url", "videoUrl"}, {"hlsUrl", "videoUrl"}, {"mediaUrl", "videoUrl"}, {"mediaURL", "videoUrl"}, {"mp4URL", "videoUrl"}, {"downloadUrl", "videoUrl"}, {"url", "videoUrl"},
-			{"fileUrl", "fileUrl"}, {"fileURL", "fileUrl"}, {"resourceUrl", "fileUrl"}, {"resourceURL", "fileUrl"}, {"materialUrl", "fileUrl"}, {"attachUrl", "fileUrl"},
+			{"userSign", "userSign"}, {"user_sign", "userSign"}, {"userSignKey", "userSign"}, {"user_sign_key", "userSign"}, {"xUserSign", "userSign"}, {"x_user_sign", "userSign"}, {"signature", "userSign"}, {"sign", "userSign"},
+			{"videoUrl", "videoUrl"}, {"videoURL", "videoUrl"}, {"playUrl", "videoUrl"}, {"playURL", "videoUrl"}, {"m3u8Url", "videoUrl"}, {"m3u8URL", "videoUrl"}, {"hlsUrl", "videoUrl"}, {"hlsURL", "videoUrl"}, {"mediaUrl", "videoUrl"}, {"mediaURL", "videoUrl"}, {"mp4Url", "videoUrl"}, {"mp4URL", "videoUrl"}, {"downloadUrl", "videoUrl"}, {"downloadURL", "videoUrl"}, {"sourceUrl", "videoUrl"}, {"sourceURL", "videoUrl"}, {"resourceUrl", "videoUrl"}, {"resourceURL", "videoUrl"}, {"url", "videoUrl"},
+			{"path", "videoPath"}, {"filePath", "videoPath"}, {"mediaPath", "videoPath"}, {"resourcePath", "videoPath"}, {"sourcePath", "videoPath"}, {"playPath", "videoPath"}, {"hlsPath", "videoPath"}, {"m3u8Path", "videoPath"}, {"mp4Path", "videoPath"}, {"objectKey", "videoPath"},
+			{"fileUrl", "fileUrl"}, {"fileURL", "fileUrl"}, {"materialUrl", "fileUrl"}, {"attachUrl", "fileUrl"}, {"attachURL", "fileUrl"},
 		} {
 			if textValue(out, pair[1]) == "" {
 				if value := textValue(x, pair[0]); value != "" {
@@ -60,7 +66,23 @@ func collectCoursewareInfo(value any, out map[string]any, depth int) {
 	}
 }
 
+func hasMeaningfulCoursewareInfo(info map[string]any) bool {
+	if len(info) == 0 {
+		return false
+	}
+	for _, key := range []string{"coursewareId", "videoId", "userSign", "sourceType", "contentType"} {
+		if key == "tenantId" {
+			continue
+		}
+		if textValue(info, key) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func ocsHeadersFor(coursewareInfo map[string]any) map[string]string {
+	userSign := userSignForCourseware(coursewareInfo)
 	headers := map[string]string{
 		"Accept":          "application/json, text/plain, */*",
 		"Referer":         CCTALK_BASE_URL + "/",
@@ -68,7 +90,7 @@ func ocsHeadersFor(coursewareInfo map[string]any) map[string]string {
 		"User-Agent":      CCTALK_OCS_USER_AGENT,
 		"X-Tenant-Id":     firstNonEmpty(textValue(coursewareInfo, "tenantId"), CCTALK_TENANT_ID),
 		"X-Tenant-ID":     firstNonEmpty(textValue(coursewareInfo, "tenantId"), CCTALK_TENANT_ID),
-		"X-User-Sign":     textValue(coursewareInfo, "userSign"),
+		"X-User-Sign":     userSign,
 		"Hujiang-App-Key": CCTALK_PCWEB_KEY,
 	}
 	if headers["X-User-Sign"] == "" {
@@ -77,17 +99,74 @@ func ocsHeadersFor(coursewareInfo map[string]any) map[string]string {
 	return headers
 }
 
+func userSignForCourseware(coursewareInfo map[string]any) string {
+	if sign := firstNonEmpty(textValue(coursewareInfo, "userSign"), textValue(coursewareInfo, "xUserSign"), textValue(coursewareInfo, "signature"), textValue(coursewareInfo, "sign")); looksLikeUserSign(sign) {
+		return sign
+	}
+	coursewareID := textValue(coursewareInfo, "coursewareId")
+	for _, name := range []string{"CCTALK_USER_SIGN", "CCTALK_X_USER_SIGN", "CCTALK_USER_SIGN_KEY", "CCTALK_SIGNATURE"} {
+		if sign := strings.TrimSpace(os.Getenv(name)); looksLikeUserSign(sign) {
+			return sign
+		}
+	}
+	if coursewareID != "" {
+		envName := "CCTALK_USER_SIGN_" + strings.Trim(envNameUnsafeRe.ReplaceAllString(coursewareID, "_"), "_")
+		if sign := strings.TrimSpace(os.Getenv(envName)); looksLikeUserSign(sign) {
+			return sign
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("CCTALK_USER_SIGN_MAP")); raw != "" {
+		var root any
+		if json.Unmarshal([]byte(raw), &root) == nil {
+			if sign := lookupUserSignMap(root, coursewareID, textValue(coursewareInfo, "videoId")); sign != "" {
+				return sign
+			}
+		}
+	}
+	return ""
+}
+
+func lookupUserSignMap(root any, keys ...string) string {
+	switch x := root.(type) {
+	case map[string]any:
+		for _, key := range keys {
+			if key == "" {
+				continue
+			}
+			if sign := textAny(x[key]); looksLikeUserSign(sign) {
+				return sign
+			}
+			if m := asMap(x[key]); len(m) > 0 {
+				if sign := firstNonEmpty(textValue(m, "userSign", "xUserSign", "signature", "sign", "value")); looksLikeUserSign(sign) {
+					return sign
+				}
+			}
+		}
+		for _, field := range []string{"userSign", "xUserSign", "signature", "sign", "value"} {
+			if sign := textAny(x[field]); looksLikeUserSign(sign) {
+				return sign
+			}
+		}
+	}
+	return ""
+}
+
+func looksLikeUserSign(sign string) bool {
+	sign = strings.TrimSpace(sign)
+	if sign == "" || sign == "<nil>" {
+		return false
+	}
+	lower := strings.ToLower(sign)
+	return lower != "null" && lower != "undefined" && lower != "false" && lower != "0"
+}
+
 func (a *apiClient) resolveOCSStream(coursewareInfo map[string]any) (extractor.Stream, map[string]any, bool) {
 	coursewareID := textValue(coursewareInfo, "coursewareId")
 	if coursewareID == "" || a == nil || a.c == nil {
 		return extractor.Stream{}, nil, false
 	}
 	headers := ocsHeadersFor(coursewareInfo)
-	for _, base := range cctalkOCSCurrentBases {
-		endpoint := strings.TrimRight(base, "/") + "/courseware_contents/" + url.PathEscape(coursewareID)
-		if q := ocsQuery(coursewareInfo); q != "" {
-			endpoint += "?" + q
-		}
+	for _, endpoint := range ocsEndpoints(coursewareID, coursewareInfo) {
 		body, err := a.c.GetString(endpoint, headers)
 		if err != nil || strings.TrimSpace(body) == "" {
 			continue
@@ -114,13 +193,49 @@ func ocsQuery(coursewareInfo map[string]any) string {
 	return q.Encode()
 }
 
+func ocsEndpoints(coursewareID string, coursewareInfo map[string]any) []string {
+	q := ocsQuery(coursewareInfo)
+	seen := map[string]bool{}
+	var out []string
+	add := func(endpoint string) {
+		endpoint = strings.TrimSpace(endpoint)
+		if endpoint == "" || seen[endpoint] {
+			return
+		}
+		seen[endpoint] = true
+		out = append(out, endpoint)
+	}
+	for _, base := range cctalkOCSCurrentBases {
+		base = strings.TrimRight(base, "/")
+		current := base + "/courseware_contents/" + url.PathEscape(coursewareID)
+		if q != "" {
+			current += "?" + q
+		}
+		add(current)
+		legacy := base + "/courseware_contents/" + url.PathEscape(coursewareID) + "?part=1"
+		if q != "" {
+			legacy += "&" + q
+		}
+		add(legacy)
+	}
+	for _, host := range []string{"https://courseware-ocs.hjapi.com", "https://courseware-ocs1.hjapi.com"} {
+		add(strings.TrimRight(host, "/") + "/v5/courseware_contents/h5/" + url.PathEscape(coursewareID) + "?t=" + fmt.Sprint(time.Now().Unix()))
+	}
+	return out
+}
+
 func buildEmbeddedOCSStream(item map[string]any, coursewareInfo map[string]any) (extractor.Stream, map[string]any, bool) {
 	return buildOCSStreamFromPayload(item, coursewareInfo, ocsHeadersFor(coursewareInfo))
 }
 
 func buildOCSStreamFromPayload(payload any, coursewareInfo map[string]any, headers map[string]string) (extractor.Stream, map[string]any, bool) {
 	payload = normalizeOCSPayload(payload)
-	if mediaURL := normalizeMediaURL(findMediaURL(payload)); mediaURL != "" {
+	if mediaURL := normalizeOCSResourceURL(firstNonEmpty(findMediaURL(payload), textValue(coursewareInfo, "videoPath", "videoUrl"))); mediaURL != "" {
+		if strings.HasPrefix(strings.TrimSpace(mediaURL), "#EXTM3U") {
+			mediaURL = dataURL("application/vnd.apple.mpegurl", mediaURL)
+		} else {
+			mediaURL = signOCSMediaURL(mediaURL, headers)
+		}
 		format := pickFormat(mediaURL)
 		return extractor.Stream{Quality: "best", URLs: []string{mediaURL}, Format: format, Headers: headers, NeedMerge: format == "m3u8"}, map[string]any{"mode": "direct_ocs", "payload": payload}, true
 	}
@@ -156,6 +271,72 @@ func buildOCSStreamFromPayload(payload any, coursewareInfo map[string]any, heade
 		return stream, extra, true
 	}
 	return extractor.Stream{}, nil, false
+}
+
+func normalizeOCSResourceURL(raw string) string {
+	raw = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(raw, `\/`, `/`), `\u0026`, "&"), "&amp;", "&"))
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "#EXTM3U") {
+		return raw
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "//") || strings.HasPrefix(raw, "/") {
+		return normalizeMediaURL(raw)
+	}
+	if looksMediaURL(raw) || strings.Contains(raw, "/") {
+		return strings.TrimRight(CCTALK_OCS_MATERIAL_HOST, "/") + "/" + strings.TrimLeft(raw, "/")
+	}
+	return normalizeMediaURL(raw)
+}
+
+func signOCSMediaURL(mediaURL string, headers map[string]string) string {
+	lower := strings.ToLower(strings.TrimSpace(mediaURL))
+	if mediaURL == "" || !(strings.Contains(lower, ".m3u8") || strings.Contains(lower, ".mp4")) {
+		return mediaURL
+	}
+	userSign := firstNonEmpty(headers["X-User-Sign"], headers["X-User-sign"])
+	if userSign == "" && !isOCSMediaURL(mediaURL) {
+		return mediaURL
+	}
+	params := map[string]string{
+		"X-User-Sign": userSign,
+		"X-Tenant-ID": firstNonEmpty(headers["X-Tenant-ID"], headers["X-Tenant-Id"], CCTALK_TENANT_ID),
+	}
+	return appendQueryParams(mediaURL, params)
+}
+
+func isOCSMediaURL(raw string) bool {
+	parsed, err := url.Parse(normalizeMediaURL(raw))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Host)
+	return strings.Contains(host, "hjfile.cn") || strings.Contains(host, "hjapi.com") || strings.Contains(host, "ocs")
+}
+
+func appendQueryParams(raw string, params map[string]string) string {
+	if raw == "" || len(params) == 0 {
+		return raw
+	}
+	sep := "?"
+	if strings.Contains(raw, "?") {
+		sep = "&"
+	}
+	var parts []string
+	for key, value := range params {
+		if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+			continue
+		}
+		if strings.Contains(raw, url.QueryEscape(key)+"=") || strings.Contains(raw, key+"=") {
+			continue
+		}
+		parts = append(parts, url.QueryEscape(key)+"="+url.QueryEscape(value))
+	}
+	if len(parts) == 0 {
+		return raw
+	}
+	return raw + sep + strings.Join(parts, "&")
 }
 
 func normalizeOCSPayload(payload any) any {
@@ -253,19 +434,31 @@ func maybeDecodeText(text string) string {
 
 func candidateHosts(payload map[string]any) []string {
 	var out []string
+	seen := map[string]bool{}
 	for _, key := range []string{"cdnHosts", "cdn_hosts", "hosts", "host", "cdnHost", "baseUrl", "baseURL", "materialHost"} {
 		switch value := payload[key].(type) {
 		case string:
 			if strings.TrimSpace(value) != "" {
-				out = append(out, strings.TrimRight(strings.TrimSpace(value), "/"))
+				host := strings.TrimRight(strings.TrimSpace(value), "/")
+				if !seen[host] {
+					seen[host] = true
+					out = append(out, host)
+				}
 			}
 		case []any:
 			for _, item := range value {
 				if s := strings.TrimSpace(textAny(item)); s != "" {
-					out = append(out, strings.TrimRight(s, "/"))
+					host := strings.TrimRight(s, "/")
+					if !seen[host] {
+						seen[host] = true
+						out = append(out, host)
+					}
 				}
 			}
 		}
+	}
+	if !seen[CCTALK_OCS_MATERIAL_HOST] {
+		out = append(out, CCTALK_OCS_MATERIAL_HOST)
 	}
 	return out
 }

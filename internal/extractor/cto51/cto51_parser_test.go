@@ -1,9 +1,14 @@
 package cto51
 
 import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/md5"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"testing"
 )
 
@@ -161,4 +166,46 @@ func TestQCloudPlayParamsEncryptsOverlay(t *testing.T) {
 	if params["overlayKey"] != "" || params["overlayIv"] != "" {
 		t.Fatalf("clear overlay fallback should not be used with bundled RSA key: %#v", params)
 	}
+}
+
+func TestPriceAnd51ctoSecDataHelpers(t *testing.T) {
+	if got := normalizePriceValue("19900"); got != "199" {
+		t.Fatalf("normalizePriceValue cents = %q, want 199", got)
+	}
+	if got := extractPriceFromHTML(`<script>var course_price = "29900";</script>`); got != "299" {
+		t.Fatalf("extractPriceFromHTML var = %q, want 299", got)
+	}
+	if got := extractPriceFromHTML(`<span>免费</span>`); got != "0" {
+		t.Fatalf("extractPriceFromHTML free = %q, want 0", got)
+	}
+
+	seed := "seed-value"
+	randPlain := "rand-plain"
+	secret := []byte("0123456789abcdef")
+	key1 := []byte(testMD5Middle16(seed))
+	randCipher := testCto51CBCEncrypt([]byte(randPlain), key1, key1)
+	key2 := []byte(testMD5Middle16(seed + randPlain))
+	plainCipher := testCto51CBCEncrypt([]byte(base64.StdEncoding.EncodeToString(secret)), key2, key1)
+
+	got := derive51ctoSecData(seed, randCipher, plainCipher)
+	if !bytes.Equal(got, secret) {
+		t.Fatalf("derive51ctoSecData = %x, want %x", got, secret)
+	}
+}
+
+func testCto51CBCEncrypt(plain, key, iv []byte) string {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		panic(err)
+	}
+	pad := aes.BlockSize - len(plain)%aes.BlockSize
+	buf := append(append([]byte{}, plain...), bytes.Repeat([]byte{byte(pad)}, pad)...)
+	dst := make([]byte, len(buf))
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(dst, buf)
+	return base64.StdEncoding.EncodeToString(dst)
+}
+
+func testMD5Middle16(text string) string {
+	sum := md5.Sum([]byte(text))
+	return fmt.Sprintf("%x", sum)[8:24]
 }

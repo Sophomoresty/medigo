@@ -62,7 +62,14 @@ func (ct *CCTalk) Extract(rawURL string, opts *extractor.ExtractOpts) (*extracto
 	}
 	c := util.NewClient()
 	c.SetCookieJar(opts.Cookies)
-	ctx := &apiClient{c: c, headers: baseHeaders(), jar: opts.Cookies}
+	ctx := &apiClient{c: c, headers: baseHeaders(), jar: opts.Cookies, listOnly: opts.ListOnly, quality: opts.Quality}
+	if cookie := cookieHeaderFromJar(opts.Cookies); cookie != "" {
+		ctx.cookieHeader = cookie
+		ctx.headers["Cookie"] = cookie
+	}
+	if err := ctx.ensureLogin(); err != nil {
+		return nil, err
+	}
 	id := parseIDs(rawURL)
 
 	if id.VideoID != "" {
@@ -76,9 +83,11 @@ func (ct *CCTalk) Extract(rawURL string, opts *extractor.ExtractOpts) (*extracto
 
 	title := "cctalk"
 	var structs any
+	courseMeta := map[string]any{}
 	switch {
 	case id.SeriesID != "":
 		if info := ctx.getSeriesInfo(id.SeriesID); len(info) > 0 {
+			courseMeta = info
 			title = firstNonEmpty(textValue(info, "courseName", "seriesName", "title", "name"), "cctalk_"+id.SeriesID)
 		} else {
 			title = "cctalk_" + id.SeriesID
@@ -86,6 +95,7 @@ func (ct *CCTalk) Extract(rawURL string, opts *extractor.ExtractOpts) (*extracto
 		structs = ctx.getSeriesStructs(id.SeriesID)
 	case id.GroupID != "":
 		if info := ctx.getGroupInfo(id.GroupID); len(info) > 0 {
+			courseMeta = info
 			title = firstNonEmpty(textValue(info, "courseName", "groupName", "title", "name"), "cctalk_"+id.GroupID)
 		} else {
 			title = "cctalk_" + id.GroupID
@@ -96,6 +106,7 @@ func (ct *CCTalk) Extract(rawURL string, opts *extractor.ExtractOpts) (*extracto
 		}
 	case id.CourseID != "":
 		if info := ctx.getCourseDetail(id.CourseID); len(info) > 0 {
+			courseMeta = info
 			title = firstNonEmpty(textValue(info, "courseName", "title", "name"), "cctalk_"+id.CourseID)
 		} else {
 			title = "cctalk_" + id.CourseID
@@ -109,17 +120,20 @@ func (ct *CCTalk) Extract(rawURL string, opts *extractor.ExtractOpts) (*extracto
 		return nil, fmt.Errorf("cannot parse cctalk course/group/series/video id from URL")
 	}
 
-	entries := buildEntries(ctx, structs, id.SeriesID)
+	entries, chapters := buildEntriesAndChapters(ctx, structs, id, courseMeta)
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("cctalk: no playable video URL found in API response")
 	}
-	return &extractor.MediaInfo{Site: "cctalk", Title: util.SanitizeFilename(title), Entries: entries}, nil
+	return &extractor.MediaInfo{Site: "cctalk", Title: util.SanitizeFilename(title), Entries: entries, Chapters: chapters, Extra: courseExtra(id, courseMeta)}, nil
 }
 
 type apiClient struct {
-	c       *util.Client
-	headers map[string]string
-	jar     http.CookieJar
+	c            *util.Client
+	headers      map[string]string
+	jar          http.CookieJar
+	cookieHeader string
+	listOnly     bool
+	quality      string
 }
 
 func baseHeaders() map[string]string {
@@ -176,8 +190,11 @@ func (a *apiClient) requestJSON(u string, data map[string]string, method string)
 func (a *apiClient) getCourseStructs(courseID string) any {
 	for _, version := range []string{"v1.1", "v1.2"} {
 		data := extractData(a.requestAPI(fmt.Sprintf("/course/%s/course_structs", courseID), map[string]string{"orderType": "1"}, "", version))
-		if list := extractList(data); len(list) > 0 {
-			return list
+		if normalized := normalizeSeriesStructs(data, ""); len(walkMaps(normalized)) > 0 {
+			if details := a.batchQueryLesson(courseID, normalized); len(details) > 0 {
+				normalized = mergeStructsWithDetails(normalized, details)
+			}
+			return normalized
 		}
 		if m := asMap(data); len(m) > 0 {
 			return m
@@ -190,18 +207,15 @@ func (a *apiClient) getSeriesStructs(seriesID string) any {
 	for _, endpoint := range []string{"/series/all_lesson_list", "/series/all_video_list"} {
 		for _, version := range []string{"v1.2", "v1.1"} {
 			data := extractData(a.requestAPI(endpoint, map[string]string{"showStudyTime": "true", "limit": "", "seriesId": seriesID}, "", version))
-			if list := extractList(data); len(list) > 0 {
-				return list
-			}
-			if m := asMap(data); len(m) > 0 {
-				return m
+			if normalized := normalizeSeriesStructs(data, seriesID); len(walkMaps(normalized)) > 0 {
+				return normalized
 			}
 		}
 	}
 	for _, version := range []string{"v1.1", "v1.2"} {
 		data := extractData(a.requestAPI(fmt.Sprintf("/series/%s/content_list", seriesID), nil, "", version))
-		if list := extractList(data); len(list) > 0 {
-			return list
+		if normalized := normalizeSeriesStructs(data, seriesID); len(walkMaps(normalized)) > 0 {
+			return normalized
 		}
 	}
 	return nil
@@ -251,7 +265,7 @@ func (a *apiClient) getGroupVideoList(groupID, seriesID string) any {
 		start += len(page)
 	}
 	sortGroupVideoItems(out)
-	return out
+	return normalizeSeriesStructs(map[string]any{"items": out}, seriesID)
 }
 
 func (a *apiClient) getVideoPlayInfo(videoID, seriesID string) map[string]any {
@@ -268,14 +282,34 @@ func (a *apiClient) getVideoPlayInfo(videoID, seriesID string) map[string]any {
 }
 
 func buildEntries(a *apiClient, structs any, fallbackSeries string) []*extractor.MediaInfo {
+	entries, _ := buildEntriesAndChapters(a, structs, ids{SeriesID: fallbackSeries}, nil)
+	return entries
+}
+
+func buildEntriesFlat(a *apiClient, structs any, fallback ids, courseMeta map[string]any) []*extractor.MediaInfo {
 	var entries []*extractor.MediaInfo
 	seen := map[string]bool{}
 	for i, node := range walkMaps(structs) {
-		seriesID := firstNonEmpty(textValue(node, "seriesId"), fallbackSeries)
-		videoID := firstNonEmpty(textValue(node, "videoId", "video_id", "contentId", "lessonId", "id", "bizId"))
+		seriesID := firstNonEmpty(textValue(node, "seriesId", "series_id"), fallback.SeriesID)
+		videoID := firstNonEmpty(textValue(node, "videoId", "video_id", "contentId", "content_id", "lessonId", "lesson_id", "id", "bizId"))
+		lessonID := firstNonEmpty(textValue(node, "lessonId", "lesson_id"), videoID)
 		merged := node
-		if findMediaURL(merged) == "" && !hasDownloadableResource(merged) && videoID != "" {
+		if _, ok := merged["courseId"]; !ok && fallback.CourseID != "" {
+			merged = mergeMaps(map[string]any{"courseId": fallback.CourseID}, merged)
+		}
+		if _, ok := merged["groupId"]; !ok && fallback.GroupID != "" {
+			merged = mergeMaps(map[string]any{"groupId": fallback.GroupID}, merged)
+		}
+		if findMediaURL(merged) == "" && !hasDownloadableResource(merged) && lessonID != "" && a != nil && a.c != nil {
+			if detail := a.getLessonInfo(lessonID); len(detail) > 0 {
+				merged = mergeMaps(merged, detail)
+			}
+		}
+		if findMediaURL(merged) == "" && !hasDownloadableResource(merged) && videoID != "" && a != nil && a.c != nil {
 			merged = mergeMaps(merged, a.getVideoPlayInfo(videoID, seriesID))
+		}
+		if len(courseMeta) > 0 {
+			merged = mergeMaps(courseMeta, merged)
 		}
 		for _, entry := range entriesFromMap(a, merged, fmt.Sprintf("课时%d", i+1)) {
 			key := entryKey(entry)
@@ -305,15 +339,25 @@ func mediaFromMap(a *apiClient, item map[string]any, fallbackTitle string) (*ext
 			extra["playback_type"] = playbackType(item, extra)
 			return &extractor.MediaInfo{Site: "cctalk", Title: util.SanitizeFilename(title), Streams: map[string]extractor.Stream{"best": stream}, Extra: extra}, nil
 		}
-		if stream, extra, ok := a.resolveOCSStream(coursewareInfo); ok {
+		if hasMeaningfulCoursewareInfo(coursewareInfo) {
+			if stream, extra, ok := a.resolveOCSStream(coursewareInfo); ok {
+				title := firstNonEmpty(textValue(item, "lessonName", "videoName", "contentName", "title", "name", "subject"), fallbackTitle)
+				extra["tenantId"] = firstNonEmpty(textValue(coursewareInfo, "tenantId"), CCTALK_TENANT_ID)
+				extra["courseware_info"] = coursewareInfo
+				extra["playback_type"] = playbackType(item, extra)
+				return &extractor.MediaInfo{Site: "cctalk", Title: util.SanitizeFilename(title), Streams: map[string]extractor.Stream{"best": stream}, Extra: extra}, nil
+			}
+		}
+		if stream, extra, ok := a.resolveProviderStream(item); ok {
 			title := firstNonEmpty(textValue(item, "lessonName", "videoName", "contentName", "title", "name", "subject"), fallbackTitle)
 			extra["tenantId"] = firstNonEmpty(textValue(coursewareInfo, "tenantId"), CCTALK_TENANT_ID)
 			extra["courseware_info"] = coursewareInfo
 			extra["playback_type"] = playbackType(item, extra)
 			return &extractor.MediaInfo{Site: "cctalk", Title: util.SanitizeFilename(title), Streams: map[string]extractor.Stream{"best": stream}, Extra: extra}, nil
 		}
-	} else if len(coursewareInfo) > 0 {
+	} else if hasMeaningfulCoursewareInfo(coursewareInfo) {
 		ocsHeaders = ocsHeadersFor(coursewareInfo)
+		mediaURL = signOCSMediaURL(mediaURL, ocsHeaders)
 		ocsExtra["courseware_info"] = coursewareInfo
 	}
 	if mediaURL == "" {
@@ -373,7 +417,7 @@ func extractList(v any) []any {
 	case []any:
 		return x
 	case map[string]any:
-		for _, k := range []string{"items", "list", "lessonList", "videoList", "contentList", "records", "rows"} {
+		for _, k := range []string{"items", "list", "lessonList", "lesson_list", "videoList", "video_list", "contentList", "content_list", "records", "rows", "dataList", "recordList", "mediaList", "playList", "resourceList", "materialList"} {
 			if l := extractList(x[k]); len(l) > 0 {
 				return l
 			}
@@ -397,7 +441,7 @@ func walkMaps(v any) []map[string]any {
 			}
 		case map[string]any:
 			out = append(out, x)
-			for _, k := range []string{"children", "childs", "nodes", "lessons", "lessonList", "items", "list", "contents", "contentList", "videoList", "videos", "recordList", "mediaList", "playList"} {
+			for _, k := range childKeys() {
 				walk(x[k])
 			}
 		}
@@ -419,14 +463,22 @@ func findMediaURL(v any) string {
 			}
 		}
 	case map[string]any:
-		for _, k := range []string{"videoUrl", "playUrl", "m3u8Url", "hlsUrl", "mediaUrl", "mediaURL", "mp4URL", "downloadUrl", "media_url", "fileUrl", "fileURL", "url"} {
+		for _, k := range []string{"videoUrl", "videoURL", "playUrl", "playURL", "m3u8Url", "m3u8URL", "hlsUrl", "hlsURL", "mediaUrl", "mediaURL", "mp4Url", "mp4URL", "downloadUrl", "downloadURL", "sourceUrl", "sourceURL", "resourceUrl", "resourceURL", "media_url", "play_url", "fileUrl", "fileURL", "url"} {
 			if u := findMediaURL(x[k]); u != "" {
 				return u
 			}
 		}
-		for _, k := range []string{"playInfo", "ocsInfo", "videoInfo", "mediaInfo", "coursewareInfo", "courseWareInfo", "contentInfo", "resourceInfo", "activityInfo", "lessonInfo", "detail", "raw"} {
+		for _, k := range []string{"playInfo", "play_info", "ocsInfo", "ocs_info", "videoInfo", "video_info", "mediaInfo", "media_info", "coursewareInfo", "courseWareInfo", "courseware_info", "contentInfo", "content_info", "resourceInfo", "resource_info", "activityInfo", "activity_info", "lessonInfo", "lesson_info", "detail", "raw"} {
 			if u := findMediaURL(x[k]); u != "" {
 				return u
+			}
+		}
+		for _, nested := range x {
+			switch nested.(type) {
+			case []any, map[string]any:
+				if u := findMediaURL(nested); u != "" {
+					return u
+				}
 			}
 		}
 	}
@@ -441,7 +493,7 @@ func looksMediaURL(s string) bool {
 }
 
 func normalizeMediaURL(s string) string {
-	s = strings.TrimSpace(strings.ReplaceAll(s, `\/`, `/`))
+	s = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(s, `\/`, `/`), `\u0026`, "&"), "&amp;", "&"))
 	if strings.HasPrefix(s, "//") {
 		return "https:" + s
 	}

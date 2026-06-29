@@ -2,8 +2,10 @@
 package tmooc
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"regexp"
 	"strings"
@@ -92,7 +94,7 @@ func extractWebCourse(c *util.Client, h map[string]string, rawURL string) (*extr
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("tmooc web: no playable videos found")
 	}
-	return &extractor.MediaInfo{Site: "tmooc", Title: sanitize(title), Entries: entries, Extra: map[string]any{"course_id": courseID, "mode": "web"}}, nil
+	return &extractor.MediaInfo{Site: "tmooc", Title: sanitize(title), Entries: entries, Extra: map[string]any{"course_id": courseID, "mode": "web", "price": extractWebCoursePrice(body), "purchased": true}}, nil
 }
 func extractTTSCourse(c *util.Client, h map[string]string, rawURL string) (*extractor.MediaInfo, error) {
 	courseID := first(match1(rawURL, `[?&](?:courseId|stuClassId|studentClassId|id)=(\w+)`), match1(rawURL, `/course/(\w+)`))
@@ -111,7 +113,7 @@ func extractTTSCourse(c *util.Client, h map[string]string, rawURL string) (*extr
 	if courseID == "" {
 		return nil, fmt.Errorf("cannot parse tmooc course id from URL or course list")
 	}
-	_ = activateCourse(c, h, selected)
+	activation := activateCourse(c, h, selected)
 	outline, err := requestJSON(c, course_outline_api, nil, h)
 	if err != nil {
 		return nil, fmt.Errorf("tmooc course outline: %w", err)
@@ -132,7 +134,7 @@ func extractTTSCourse(c *util.Client, h map[string]string, rawURL string) (*extr
 		return nil, fmt.Errorf("tmooc tts: no playable videos found")
 	}
 	title := first(extractCourseTitle(selected), "tmooc_"+courseID)
-	return &extractor.MediaInfo{Site: "tmooc", Title: sanitize(title), Entries: entries, Extra: map[string]any{"course_id": courseID, "mode": "tts"}}, nil
+	return &extractor.MediaInfo{Site: "tmooc", Title: sanitize(title), Entries: entries, Extra: map[string]any{"course_id": courseID, "mode": "tts", "price": extractCoursePrice(selected), "purchased": extractCoursePurchased(selected), "activation": activation}}, nil
 }
 func requestCourseList(c *util.Client, h map[string]string) ([]map[string]any, any) {
 	apis := []struct{ url, ref string }{{legacy_course_api, tts_referer + "studentCenter/toMyttsPage"}, {my_course_api, tts_referer}, {valid_version_api, tts_referer}, {user_course_api, referer}}
@@ -153,19 +155,51 @@ func requestCourseList(c *util.Client, h map[string]string) ([]map[string]any, a
 	return nil, last
 }
 func activateCourse(c *util.Client, h map[string]string, selected map[string]any) any {
-	params := map[string]string{}
-	for _, k := range []string{"stuClassId", "studentClassId", "studentClassroomId", "id", "courseVersionId", "validVersionId", "vailidVersionId"} {
-		if v := textAt(selected, k); v != "" {
-			params[k] = v
+	candidates := collectIDs(selected)
+	seen := map[string]bool{}
+	var last any
+	for _, id := range candidates {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if resp := loginWithStuClassID(c, h, id); resp != nil {
+			last = resp
+			if token := extractToken(resp); token != "" {
+				setTokenHeaders(h, token)
+				setStuClassHeaders(h, id)
+				return resp
+			}
 		}
 	}
-	for _, api := range []string{course_login_api, base_course_login_api} {
-		resp, err := requestJSON(c, api, params, h)
+	for _, id := range candidates {
+		if id == "" {
+			continue
+		}
+		resp, err := requestJSON(c, fmt.Sprintf(change_version_api, url.PathEscape(id)), nil, mergeHeaders(h, map[string]string{"Origin": "https://tts10.tmooc.cn", "Referer": tts_referer}))
 		if err == nil {
-			return resp
+			last = resp
+			if token := extractToken(resp); token != "" {
+				setTokenHeaders(h, token)
+				return resp
+			}
 		}
 	}
-	return nil
+	for _, id := range candidates {
+		if id == "" {
+			continue
+		}
+		resp, err := requestJSON(c, base_course_login_api, map[string]string{"stuClassId": id}, mergeHeaders(h, map[string]string{"Origin": "https://tts10.tmooc.cn", "Referer": tts_referer + "sso-tmooc?ttsSsoRedirect=true&stuClassId=" + url.QueryEscape(id)}))
+		if err == nil {
+			last = resp
+			if token := extractToken(resp); token != "" {
+				setTokenHeaders(h, token)
+				setStuClassHeaders(h, id)
+				return resp
+			}
+		}
+	}
+	return last
 }
 func collectWebVideos(page string, courseID string) []webVideo {
 	var out []webVideo
@@ -229,6 +263,47 @@ func resolveTTSVideo(c *util.Client, h map[string]string, vid string) string {
 	return first(findURL(resp), textAt(unwrapMap(resp), "playUrl", "videoUrl", "url"))
 }
 func requestJSON(c *util.Client, api string, params map[string]string, h map[string]string) (any, error) {
+	return requestJSONWithMethod(c, api, params, nil, nil, h, httpMethodGet)
+}
+
+const (
+	httpMethodGet  = "get"
+	httpMethodPost = "post"
+)
+
+func loginWithStuClassID(c *util.Client, h map[string]string, stuClassID string) any {
+	stuClassID = strings.TrimSpace(stuClassID)
+	if stuClassID == "" {
+		return nil
+	}
+	setStuClassHeaders(h, stuClassID)
+	headers := mergeHeaders(h, map[string]string{"Origin": "https://tts10.tmooc.cn", "Referer": tts_referer})
+	attempts := []struct {
+		method string
+		params map[string]string
+		form   map[string]string
+		json   map[string]any
+	}{
+		{method: httpMethodPost, json: map[string]any{"stuClassId": stuClassID}},
+		{method: httpMethodPost, form: map[string]string{"stuClassId": stuClassID}},
+		{method: httpMethodGet, params: map[string]string{"stuClassId": stuClassID}},
+	}
+	var last any
+	for _, attempt := range attempts {
+		resp, err := requestJSONWithMethod(c, course_login_api, attempt.params, attempt.form, attempt.json, headers, attempt.method)
+		if err != nil {
+			continue
+		}
+		last = resp
+		if token := extractToken(resp); token != "" {
+			setTokenHeaders(h, token)
+			return resp
+		}
+	}
+	return last
+}
+
+func requestJSONWithMethod(c *util.Client, api string, params map[string]string, form map[string]string, jsonData map[string]any, h map[string]string, method string) (any, error) {
 	u, err := url.Parse(api)
 	if err != nil {
 		return nil, err
@@ -240,12 +315,47 @@ func requestJSON(c *util.Client, api string, params map[string]string, h map[str
 		}
 	}
 	u.RawQuery = q.Encode()
-	body, err := c.GetString(u.String(), h)
-	if err != nil {
-		return nil, err
+	var body []byte
+	switch strings.ToLower(first(method, httpMethodGet)) {
+	case httpMethodPost:
+		headers := clone(h)
+		var reader io.Reader
+		if jsonData != nil {
+			raw, err := json.Marshal(jsonData)
+			if err != nil {
+				return nil, err
+			}
+			reader = bytes.NewReader(raw)
+			headers["Content-Type"] = "application/json;charset=UTF-8"
+		} else {
+			values := url.Values{}
+			for k, v := range form {
+				values.Set(k, v)
+			}
+			reader = strings.NewReader(values.Encode())
+			headers["Content-Type"] = "application/x-www-form-urlencoded"
+		}
+		resp, err := c.Post(u.String(), reader, headers)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, u.String())
+		}
+		body, err = io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		text, err := c.GetString(u.String(), h)
+		if err != nil {
+			return nil, err
+		}
+		body = []byte(text)
 	}
 	var out any
-	if err := json.Unmarshal([]byte(body), &out); err != nil {
+	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, err
 	}
 	return out, nil

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -362,6 +363,27 @@ func bytesToMB(v float64) float64 {
 		return v / 1024 / 1024
 	}
 	return v
+}
+
+var yxPriceNumberRe = regexp.MustCompile(`\d+(?:\.\d+)?`)
+
+func normalizeYXPrice(v any) float64 {
+	if v == nil {
+		return 0
+	}
+	text := strings.TrimSpace(fmt.Sprint(v))
+	if text == "" || text == "<nil>" {
+		return 0
+	}
+	text = strings.NewReplacer(",", "", "¥", "", "￥", "", "元", "").Replace(text)
+	if match := yxPriceNumberRe.FindString(text); match != "" {
+		text = match
+	}
+	price, err := strconv.ParseFloat(text, 64)
+	if err != nil || price < 0 {
+		return 0
+	}
+	return price
 }
 
 func maxFloat(a, b float64) float64 {

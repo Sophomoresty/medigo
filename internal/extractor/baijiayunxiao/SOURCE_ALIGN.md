@@ -6,6 +6,7 @@
 |---|---|---|
 | `Baijiayun_Video.pyc.1shot.cdc.py:40-41` | `baijiayunxiao.go:24-27` `urlGetPlayInfo/urlGetPlayURL/urlHome` | ✓ |
 | `Baijiayunxiao_Course.pyc.1shot.cdc.py:41-47` | `baijiayunxiao.go:29-31` `urlCourseInfo/urlToken/urlPlayToken` | ✓ |
+| 自定义机构域名 `.../course/{id}?type=bjyx` | `parseCourseURL` | ✓ |
 
 ## HTTP 调用
 
@@ -24,6 +25,7 @@
 | `id`, `video_id`, `room_id`, `title`, `name`, `periods_title`, `child`, `children` | `courseNode` tags | ✓ |
 | `token`, `video_id`, `room_id`, `classid` | `playTokenResponse` tags + regex fallback | ✓ |
 | `data.play_info`, `data.video_url`, `data.playback_url`, `data.video[].url` | `shared.BaijiayunPlaybackResponse` | ✓ |
+| `mp4/m3u8/ev1/ev2` 媒体格式 | `pickFormat` + `mediaInfo` | m3u8 自动 `NeedMerge` |
 
 ## 云端课堂 Yunduan_Course.py
 

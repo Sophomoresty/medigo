@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,7 +49,15 @@ const (
 	sidPrefix      = "study"
 )
 
-var patterns = []string{`(?:[\w-]+\.)?233\.com/`}
+var (
+	patterns       = []string{`(?:[\w-]+\.)?233\.com/`}
+	priceNumberRe  = regexp.MustCompile(`\d+(?:\.\d+)?`)
+	priceKeyFamily = []string{
+		"price", "salePrice", "sellPrice", "actualPrice", "productPrice", "coursePrice", "originalPrice", "marketPrice",
+		"payPrice", "payMoney", "paymoney", "orderPrice", "orderMoney", "orderAmount", "totalAmount", "totalMoney",
+		"amount", "realAmount", "cashAmount", "amt", "paymentAmount", "settleAmount",
+	}
+)
 
 func init() {
 	extractor.Register(&Wangxiao233{}, extractor.SiteInfo{Name: "Wangxiao233", URL: "233.com", NeedAuth: true})
@@ -58,10 +67,17 @@ type Wangxiao233 struct{}
 
 func (w *Wangxiao233) Patterns() []string { return patterns }
 
-type wx233Session struct{ token string }
+type wx233Session struct {
+	token   string
+	cookies map[string]string
+}
 type wx233Course struct {
 	productID, childProductID, versionProductID, versionID, teacherID string
 	courseID, lmProductID, groupProductID, classType, domain, title   string
+	orderNo, orderProductID, productNetID                             string
+	purchased                                                         bool
+	price                                                             float64
+	source                                                            map[string]any
 }
 type wx233Video struct{ title, detailID, polyVid, essVid, aliyunVid, mp3URL, directURL string }
 type wx233File struct {
@@ -77,7 +93,7 @@ func (w *Wangxiao233) Extract(rawURL string, opts *extractor.ExtractOpts) (*extr
 	}
 	c := util.NewClient()
 	c.SetCookieJar(opts.Cookies)
-	sess := wx233Session{token: tokenFromJar(opts.Cookies)}
+	sess := wx233Session{token: tokenFromJar(opts.Cookies), cookies: cookiesFromJar(opts.Cookies)}
 	if sess.token == "" {
 		return nil, fmt.Errorf("wangxiao233 requires clientauthentication cookie")
 	}
@@ -86,13 +102,24 @@ func (w *Wangxiao233) Extract(rawURL string, opts *extractor.ExtractOpts) (*extr
 	}
 	course := parseCourse(rawURL)
 	if course.productID == "" {
-		var err error
-		course, err = firstPurchasedCourse(c, sess, course.domain)
+		courses, err := purchasedCourses(c, sess, course)
 		if err != nil {
 			return nil, err
 		}
+		if opts.ListOnly || len(courses) != 1 {
+			return courseListMedia(courses), nil
+		}
+		course = courses[0]
+	} else if course.childProductID == "" || course.teacherID == "" {
+		if filled, ok := findPurchasedCourse(c, sess, course); ok {
+			course = mergeCourse(course, filled)
+		}
 	}
 	tagData, _ := apiGetData(c, sess, urlTag, map[string]string{"teacherId": course.teacherID, "childProductId": course.childProductID, "systemType": "2", "lmProductId": "", "productId": course.productID, "clientType": "3"})
+	course = mergeCourse(course, courseFromTag(tagData, course))
+	if !course.purchased && purchasedFromAny(tagData) {
+		course.purchased = true
+	}
 	children := childCourses(tagData, course)
 	if len(children) == 0 {
 		children = []wx233Course{course}
@@ -101,9 +128,12 @@ func (w *Wangxiao233) Extract(rawURL string, opts *extractor.ExtractOpts) (*extr
 	seen := map[string]bool{}
 	for _, child := range children {
 		child = fillVersion(c, sess, child)
-		chapterData, err := apiGetData(c, sess, urlChapter, map[string]string{"versionId": child.versionID, "productId": course.productID, "currentParentProductId": course.productID, "groupProductId": "", "clientType": "3"})
+		chapterData, err := apiGetData(c, sess, urlChapter, map[string]string{"versionId": child.versionID, "productId": course.productID, "currentParentProductId": course.productID, "groupProductId": chapterGroupProductID(course, tagData), "clientType": "3"})
 		if err != nil || chapterData == nil {
 			continue
+		}
+		if !course.purchased && purchasedFromAny(chapterData) {
+			course.purchased = true
 		}
 		for _, v := range collectVideos(chapterData) {
 			mi, err := resolveVideo(c, sess, v, opts)
@@ -143,7 +173,7 @@ func (w *Wangxiao233) Extract(rawURL string, opts *extractor.ExtractOpts) (*extr
 		return nil, fmt.Errorf("wangxiao233: no playable video or file resolved from chapter list")
 	}
 	title := firstNonEmpty(course.title, "wangxiao233_"+course.productID)
-	return &extractor.MediaInfo{Site: "wangxiao233", Title: title, Entries: entries}, nil
+	return &extractor.MediaInfo{Site: "wangxiao233", Title: title, Entries: entries, Extra: courseExtra(c, sess, course, tagData)}, nil
 }
 
 func apiGetData(c *util.Client, sess wx233Session, apiURL string, params map[string]string) (any, error) {
@@ -168,9 +198,13 @@ func apiGet(c *util.Client, sess wx233Session, apiURL string, params map[string]
 	return parseJSON(body)
 }
 func apiPost(c *util.Client, sess wx233Session, apiURL string, data map[string]any) (map[string]any, error) {
-	payload, err := json.Marshal(data)
-	if err != nil {
-		return nil, fmt.Errorf("wangxiao233 marshal: %w", err)
+	payload := []byte{}
+	if len(data) > 0 {
+		var err error
+		payload, err = json.Marshal(data)
+		if err != nil {
+			return nil, fmt.Errorf("wangxiao233 marshal: %w", err)
+		}
 	}
 	resp, err := c.Post(apiURL, bytes.NewReader(payload), signedHeaders(sess, "post", string(payload)))
 	if err != nil {
@@ -184,7 +218,10 @@ func apiPost(c *util.Client, sess wx233Session, apiURL string, data map[string]a
 	return parseJSON(string(b))
 }
 func signedHeaders(sess wx233Session, method, text string) map[string]string {
-	sid := sidPrefix + time.Now().Format("20060102150405") + "1000099999"
+	now := time.Now()
+	r1 := 10000 + now.Nanosecond()%90000
+	r2 := 10000 + (now.UnixNano()/1000)%90000
+	sid := fmt.Sprintf("%s%s%05d%05d", sidPrefix, now.Format("20060102150405"), r1, r2)
 	seed := signSecret + sid + text
 	sum := md5.Sum([]byte(seed))
 	return map[string]string{"Content-Type": "application/json", "Accept": "application/json, text/plain, */*", "Origin": "https://wx.233.com", "Referer": refererURL, "token": sess.token, "sid": sid, "sign": strings.ToUpper(hex.EncodeToString(sum[:]))}
@@ -207,32 +244,185 @@ func parseCourse(raw string) wx233Course {
 	return c
 }
 func firstPurchasedCourse(c *util.Client, sess wx233Session, domain string) (wx233Course, error) {
-	domain = firstNonEmpty(domain, "aq")
-	for _, apiURL := range []string{urlUserCourse, urlVktCourse} {
-		data, err := apiGetData(c, sess, apiURL, map[string]string{"domain": domain, "types": "1"})
-		if err != nil {
-			continue
-		}
-		for _, m := range mapsUnder(data) {
-			pid := val(m, "productId")
-			if pid != "" {
-				return wx233Course{
-					productID:        pid,
-					childProductID:   val(m, "childProductId"),
-					versionProductID: val(m, "versionProductId"),
-					teacherID:        val(m, "teacherId"),
-					courseID:         firstNonEmpty(val(m, "courseId"), val(m, "course_id")),
-					lmProductID:      val(m, "lmProductId"),
-					groupProductID:   val(m, "groupProductId"),
-					classType:        val(m, "classType"),
-					domain:           domain,
-					title:            firstNonEmpty(val(m, "name"), val(m, "title"), val(m, "productName")),
-				}, nil
+	courses, err := purchasedCourses(c, sess, wx233Course{domain: domain})
+	if err != nil {
+		return wx233Course{}, err
+	}
+	return courses[0], nil
+}
+
+func purchasedCourses(c *util.Client, sess wx233Session, base wx233Course) ([]wx233Course, error) {
+	var courses []wx233Course
+	seen := map[string]bool{}
+	for _, domain := range courseDomains(c, sess, base) {
+		for _, apiURL := range []string{urlVktCourse, urlUserCourse} {
+			data, err := apiGetData(c, sess, apiURL, map[string]string{"domain": domain, "types": "1"})
+			if err != nil {
+				continue
+			}
+			root := asMap(data)
+			list := listFromResponseData(firstNonNil(root["courseList"], data))
+			if len(list) == 0 {
+				list = mapsUnder(data)
+			}
+			for _, m := range list {
+				course := courseFromMap(m, domain)
+				if course.productID == "" {
+					continue
+				}
+				key := strings.Join([]string{course.productID, course.childProductID, course.versionProductID, course.teacherID}, "\x00")
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				courses = append(courses, course)
 			}
 		}
 	}
-	return wx233Course{}, fmt.Errorf("wangxiao233: purchased course list is empty")
+	if len(courses) == 0 {
+		return nil, fmt.Errorf("wangxiao233: purchased course list is empty")
+	}
+	return courses, nil
 }
+
+func findPurchasedCourse(c *util.Client, sess wx233Session, target wx233Course) (wx233Course, bool) {
+	courses, err := purchasedCourses(c, sess, target)
+	if err != nil {
+		return wx233Course{}, false
+	}
+	for _, course := range courses {
+		if course.productID == target.productID || course.courseID == target.productID || (target.courseID != "" && course.courseID == target.courseID) {
+			return course, true
+		}
+	}
+	return wx233Course{}, false
+}
+
+func courseDomains(c *util.Client, sess wx233Session, base wx233Course) []string {
+	out := []string{}
+	add := func(v string) {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	add(base.domain)
+	if base.source != nil {
+		add(domainFromURL(val(base.source, "url")))
+	}
+	if data, err := apiGetData(c, sess, urlBuyDomain, nil); err == nil {
+		for _, m := range mapsUnder(data) {
+			for _, key := range []string{"domain", "childDomain", "parentDomain"} {
+				add(val(m, key))
+			}
+		}
+	}
+	add("ccbp")
+	add("aq")
+	return uniqueStrings(out)
+}
+
+func domainFromURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return u.Query().Get("domain")
+}
+
+func courseFromMap(m map[string]any, domain string) wx233Course {
+	price, _ := priceFromAny(m)
+	return wx233Course{
+		source:           m,
+		productID:        val(m, "productId"),
+		childProductID:   val(m, "childProductId"),
+		versionProductID: val(m, "versionProductId"),
+		teacherID:        val(m, "teacherId"),
+		courseID:         firstNonEmpty(val(m, "courseId"), val(m, "course_id"), val(m, "productId")),
+		lmProductID:      val(m, "lmProductId"),
+		groupProductID:   val(m, "groupProductId"),
+		classType:        val(m, "classType"),
+		domain:           firstNonEmpty(val(m, "domain"), domain),
+		title:            cleanName(firstNonEmpty(val(m, "productName"), val(m, "name"), val(m, "title"))),
+		orderNo:          val(m, "orderNo"),
+		orderProductID:   val(m, "orderProductId"),
+		productNetID:     val(m, "productNetId"),
+		purchased:        true,
+		price:            price,
+	}
+}
+
+func mergeCourse(primary, fallback wx233Course) wx233Course {
+	primary.productID = firstNonEmpty(primary.productID, fallback.productID)
+	primary.childProductID = firstNonEmpty(primary.childProductID, fallback.childProductID)
+	primary.versionProductID = firstNonEmpty(primary.versionProductID, fallback.versionProductID)
+	primary.versionID = firstNonEmpty(primary.versionID, fallback.versionID)
+	primary.teacherID = firstNonEmpty(primary.teacherID, fallback.teacherID)
+	primary.courseID = firstNonEmpty(primary.courseID, fallback.courseID)
+	primary.lmProductID = firstNonEmpty(primary.lmProductID, fallback.lmProductID)
+	primary.groupProductID = firstNonEmpty(primary.groupProductID, fallback.groupProductID)
+	primary.classType = firstNonEmpty(primary.classType, fallback.classType)
+	primary.domain = firstNonEmpty(primary.domain, fallback.domain)
+	primary.title = firstNonEmpty(primary.title, fallback.title)
+	primary.orderNo = firstNonEmpty(primary.orderNo, fallback.orderNo)
+	primary.orderProductID = firstNonEmpty(primary.orderProductID, fallback.orderProductID)
+	primary.productNetID = firstNonEmpty(primary.productNetID, fallback.productNetID)
+	primary.purchased = primary.purchased || fallback.purchased
+	if primary.price == 0 {
+		primary.price = fallback.price
+	}
+	if primary.source == nil {
+		primary.source = fallback.source
+	}
+	return primary
+}
+
+func courseListMedia(courses []wx233Course) *extractor.MediaInfo {
+	entries := make([]*extractor.MediaInfo, 0, len(courses))
+	for _, course := range courses {
+		extra := map[string]any{
+			"product_id":         course.productID,
+			"course_id":          course.courseID,
+			"child_product_id":   course.childProductID,
+			"version_product_id": course.versionProductID,
+			"teacher_id":         course.teacherID,
+			"domain":             course.domain,
+			"purchased":          course.purchased,
+		}
+		if course.price > 0 {
+			extra["price"] = course.price
+		}
+		if course.source != nil {
+			extra["raw"] = course.source
+		}
+		entries = append(entries, &extractor.MediaInfo{Site: "wangxiao233", Title: firstNonEmpty(course.title, course.productID), Extra: extra})
+	}
+	return &extractor.MediaInfo{Site: "wangxiao233", Title: "wangxiao233_courses", Entries: entries}
+}
+
+func courseFromTag(tagData any, base wx233Course) wx233Course {
+	out := wx233Course{}
+	for _, m := range mapsUnder(tagData) {
+		out.domain = firstNonEmpty(out.domain, val(m, "domain"))
+		out.classType = firstNonEmpty(out.classType, val(m, "classType"))
+		out.childProductID = firstNonEmpty(out.childProductID, val(m, "currentParentProductId"), val(m, "currentProductId"))
+		out.versionProductID = firstNonEmpty(out.versionProductID, val(m, "currentProductId"), val(m, "versionProductId"))
+		out.teacherID = firstNonEmpty(out.teacherID, val(m, "currentTeacherId"))
+		out.versionID = firstNonEmpty(out.versionID, val(m, "currentVersionId"))
+		out.title = firstNonEmpty(out.title, val(m, "productName"), val(m, "className"), val(m, "currentProductName"))
+	}
+	if out.productID == "" {
+		out.productID = base.productID
+	}
+	return out
+}
+
+func chapterGroupProductID(course wx233Course, tagData any) string {
+	if course.classType == "1" || firstStringInAny(tagData, "classType") == "1" {
+		return course.productID
+	}
+	return ""
+}
+
 func childCourses(data any, base wx233Course) []wx233Course {
 	out := []wx233Course{}
 	for _, m := range mapsUnder(data) {
@@ -253,6 +443,8 @@ func childCourses(data any, base wx233Course) []wx233Course {
 			classType:        firstNonEmpty(val(m, "classType"), base.classType),
 			domain:           base.domain,
 			title:            firstNonEmpty(val(m, "courseName"), val(m, "childProductName"), val(m, "productName"), val(m, "name"), base.title),
+			purchased:        base.purchased,
+			price:            base.price,
 		})
 	}
 	return out
@@ -422,7 +614,7 @@ func collectLectureFiles(data any, child, base wx233Course) []wx233File {
 			continue
 		}
 		title := firstNonEmpty(val(m, "detailName"), val(m, "chapterName"), val(m, "name"), val(m, "title"), "资料")
-		if rawURL == "" && !looksLikeFileMeta(m) {
+		if rawURL == "" && lectureID == "" && !looksLikeFileMeta(m) {
 			continue
 		}
 		key := firstNonEmpty(lectureID, rawURL)
@@ -573,6 +765,188 @@ func resolveFileURL(c *util.Client, sess wx233Session, f wx233File, course wx233
 	}
 }
 
+func courseExtra(c *util.Client, sess wx233Session, course wx233Course, tagData any) map[string]any {
+	extra := map[string]any{
+		"product_id":         course.productID,
+		"course_id":          firstNonEmpty(course.courseID, course.productID),
+		"child_product_id":   course.childProductID,
+		"version_product_id": course.versionProductID,
+		"version_id":         course.versionID,
+		"teacher_id":         course.teacherID,
+		"domain":             course.domain,
+		"purchased":          course.purchased,
+	}
+	if course.source != nil {
+		extra["raw"] = course.source
+	}
+	if course.purchased || course.source != nil || purchasedFromAny(tagData) {
+		if price, ok := fetchCoursePrice(c, sess, course, tagData); ok {
+			extra["price"] = price
+		} else if course.purchased {
+			extra["price"] = float64(999)
+		}
+	}
+	return compactAnyMap(extra)
+}
+
+func fetchCoursePrice(c *util.Client, sess wx233Session, course wx233Course, tagData any) (float64, bool) {
+	if course.price > 0 {
+		return course.price, true
+	}
+	if price, ok := priceFromAny(tagData); ok {
+		return price, true
+	}
+	params := map[string]string{"productId": course.productID}
+	if vid := firstNonEmpty(course.versionID, firstStringInAny(tagData, "currentVersionId"), firstStringInAny(tagData, "versionId")); vid != "" {
+		params["versionId"] = vid
+	}
+	for _, apiURL := range []string{urlProductInfo, urlVktProduct} {
+		data, err := apiGet(c, sess, apiURL, params)
+		if err == nil {
+			if price, ok := priceFromAny(data); ok {
+				return price, true
+			}
+		}
+	}
+	if course.orderNo != "" {
+		data, err := apiPost(c, sess, urlOrderDetail, map[string]any{"orderNo": course.orderNo})
+		if err == nil {
+			if price, ok := priceFromAny(data); ok {
+				return price, true
+			}
+		}
+	}
+	if price, ok := priceFromCookie(sess.cookies); ok {
+		return price, true
+	}
+	return 0, false
+}
+
+func priceFromCookie(cookies map[string]string) (float64, bool) {
+	if len(cookies) == 0 {
+		return 0, false
+	}
+	raw := firstNonEmpty(cookies["wxuserinforset"], cookies["WXUSERINFOSET"])
+	if raw == "" {
+		return 0, false
+	}
+	if decoded, err := url.QueryUnescape(raw); err == nil && decoded != "" {
+		raw = decoded
+	}
+	for _, part := range strings.Split(raw, "&") {
+		k, v, ok := strings.Cut(part, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(k), "paymoney") {
+			continue
+		}
+		if price, ok := normalizePrice(v); ok {
+			return price, true
+		}
+	}
+	return 0, false
+}
+
+func priceFromAny(v any) (float64, bool) {
+	switch t := v.(type) {
+	case map[string]any:
+		for _, key := range priceKeyFamily {
+			if raw, ok := t[key]; ok {
+				if price, ok := normalizePrice(raw); ok {
+					return price, true
+				}
+			}
+		}
+		for _, child := range t {
+			if price, ok := priceFromAny(child); ok {
+				return price, true
+			}
+		}
+	case []any:
+		for _, child := range t {
+			if price, ok := priceFromAny(child); ok {
+				return price, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func normalizePrice(v any) (float64, bool) {
+	switch t := v.(type) {
+	case nil:
+		return 0, false
+	case float64:
+		if t > 0 {
+			return round2(t), true
+		}
+	case float32:
+		if t > 0 {
+			return round2(float64(t)), true
+		}
+	case int:
+		if t > 0 {
+			return float64(t), true
+		}
+	case int64:
+		if t > 0 {
+			return float64(t), true
+		}
+	case json.Number:
+		if f, err := t.Float64(); err == nil && f > 0 {
+			return round2(f), true
+		}
+	default:
+		s := strings.TrimSpace(fmt.Sprint(v))
+		if s == "" || s == "<nil>" {
+			return 0, false
+		}
+		m := priceNumberRe.FindString(strings.ReplaceAll(s, ",", ""))
+		if m == "" {
+			return 0, false
+		}
+		f, err := strconv.ParseFloat(m, 64)
+		if err == nil && f > 0 {
+			return round2(f), true
+		}
+	}
+	return 0, false
+}
+
+func round2(v float64) float64 {
+	return float64(int(v*100+0.5)) / 100
+}
+
+func purchasedFromAny(v any) bool {
+	for _, m := range mapsUnder(v) {
+		if truthy(val(m, "isBuy")) && truthy(firstNonEmpty(val(m, "isCanLearn"), "1")) {
+			return true
+		}
+		if m["learnCourseOrderRsp"] != nil || m["source"] != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func truthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "y":
+		return true
+	default:
+		return false
+	}
+}
+
+func firstStringInAny(v any, keys ...string) string {
+	for _, m := range mapsUnder(v) {
+		for _, key := range keys {
+			if s := val(m, key); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
 func groupProductForFile(f wx233File, course wx233Course) string {
 	if course.classType == "1" {
 		return firstNonEmpty(f.groupProductID, course.groupProductID)
@@ -613,6 +987,30 @@ func mapsUnder(v any) []map[string]any {
 		}
 	}
 	walk(v)
+	return out
+}
+
+func asMap(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok {
+		return m
+	}
+	return map[string]any{}
+}
+
+func compactAnyMap(in map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range in {
+		switch t := v.(type) {
+		case string:
+			if strings.TrimSpace(t) != "" {
+				out[k] = t
+			}
+		case nil:
+			continue
+		default:
+			out[k] = v
+		}
+	}
 	return out
 }
 
@@ -711,16 +1109,21 @@ func encodeParams(params map[string]string) string {
 	}
 	keys := make([]string, 0, len(params))
 	for k, v := range params {
-		if strings.TrimSpace(v) != "" {
+		v = strings.TrimSpace(v)
+		if v != "" && v != "null" && v != "undefined" {
 			keys = append(keys, k)
 		}
 	}
 	sort.Strings(keys)
-	q := url.Values{}
+	parts := make([]string, 0, len(keys))
 	for _, k := range keys {
-		q.Set(k, params[k])
+		parts = append(parts, wx233Escape(k)+"="+wx233Escape(params[k]))
 	}
-	return q.Encode()
+	return strings.Join(parts, "&")
+}
+
+func wx233Escape(s string) string {
+	return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
 }
 func tokenFromJar(jar http.CookieJar) string {
 	for _, raw := range []string{refererURL, "https://japi.233.com/"} {
@@ -733,6 +1136,19 @@ func tokenFromJar(jar http.CookieJar) string {
 		}
 	}
 	return ""
+}
+
+func cookiesFromJar(jar http.CookieJar) map[string]string {
+	out := map[string]string{}
+	for _, raw := range []string{refererURL, "https://japi.233.com/"} {
+		if u, err := url.Parse(raw); err == nil {
+			for _, c := range jar.Cookies(u) {
+				out[c.Name] = c.Value
+				out[strings.ToLower(c.Name)] = c.Value
+			}
+		}
+	}
+	return out
 }
 func media(title, u, fmtName string, extra map[string]any) *extractor.MediaInfo {
 	if title == "" {
@@ -871,6 +1287,20 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func uniqueStrings(vals []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(vals))
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 func qualityFromOpts(opts *extractor.ExtractOpts) string {

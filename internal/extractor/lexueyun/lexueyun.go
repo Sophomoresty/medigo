@@ -61,6 +61,9 @@ type lexueSession struct {
 type courseSel struct {
 	subjectID, ordSerialNo, orderID, title string
 	packageID, merchantID                  string
+	price                                  float64
+	purchased                              bool
+	raw                                    map[string]any
 }
 
 type userInfoResp struct {
@@ -146,12 +149,20 @@ func (l *Lexueyun) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 		if err != nil {
 			return nil, err
 		}
+	} else if listed, ok := findCourse(c, sess, sel); ok {
+		sel = mergeCourseSel(sel, listed)
 	}
 	if sel.title == "" {
 		sel.title = "lexueyun_" + sel.subjectID
 	}
+	if !sel.purchased {
+		sel.purchased = true
+	}
 	if err := fillSubjectDetail(c, sess, &sel); err != nil {
 		return nil, err
+	}
+	if sel.price == 0 {
+		sel.price = defaultHiddenPrice
 	}
 	lessons, err := getLessons(c, sess, sel)
 	if err != nil {
@@ -185,7 +196,22 @@ func (l *Lexueyun) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("lexueyun: no playable lesson video or downloadable file resolved")
 	}
-	return &extractor.MediaInfo{Site: "lexueyun", Title: sel.title, Entries: entries}, nil
+	return &extractor.MediaInfo{
+		Site:    "lexueyun",
+		Title:   sel.title,
+		Entries: entries,
+		Extra: map[string]any{
+			"subject_id":   sel.subjectID,
+			"ordSerialNo":  sel.ordSerialNo,
+			"order_id":     sel.orderID,
+			"package_id":   sel.packageID,
+			"merchant_id":  sel.merchantID,
+			"price":        sel.price,
+			"purchased":    sel.purchased,
+			"student_id":   sess.stuID,
+			"channel_code": channelCode,
+		},
+	}, nil
 }
 
 func loginSession(c *util.Client, jar http.CookieJar) (lexueSession, error) {
@@ -210,12 +236,40 @@ func loginSession(c *util.Client, jar http.CookieJar) (lexueSession, error) {
 }
 
 func firstCourse(c *util.Client, sess lexueSession) (courseSel, error) {
+	courses := listCourses(c, sess)
+	if len(courses) > 0 {
+		return courses[0], nil
+	}
+	return courseSel{}, fmt.Errorf("lexueyun course list is empty")
+}
+
+func findCourse(c *util.Client, sess lexueSession, wanted courseSel) (courseSel, bool) {
+	courses := listCourses(c, sess)
+	for _, course := range courses {
+		if wanted.subjectID != "" && course.subjectID != wanted.subjectID {
+			continue
+		}
+		if wanted.ordSerialNo != "" && course.ordSerialNo != wanted.ordSerialNo {
+			continue
+		}
+		if wanted.orderID != "" && course.orderID != wanted.orderID {
+			continue
+		}
+		return course, true
+	}
+	return courseSel{}, false
+}
+
+func listCourses(c *util.Client, sess lexueSession) []courseSel {
 	merchants := extractList(requestMap(c, sess, merchantListPath, map[string]any{"stuId": sess.stuID}), []string{"merchantList", "myMerchantList", "list", "records", "items", "rows"})
 	if len(merchants) == 0 && firstNonEmpty(anyString(sess.user["merchantId"]), anyString(sess.user["merchant_id"])) != "" {
 		merchants = []map[string]any{sess.user}
 	}
+	var out []courseSel
+	seen := map[string]bool{}
 	for _, m := range merchants {
 		mid := firstNonEmpty(anyString(m["merchantId"]), anyString(m["merchant_id"]), anyString(m["id"]))
+		merchantName := firstNonEmpty(anyString(m["merchantName"]), anyString(m["merchant_name"]), anyString(m["name"]))
 		orders := extractList(requestMap(c, sess, orderListPath, map[string]any{"merchantId": mid, "stuId": sess.stuID}), []string{"orderList", "orders", "courseList", "list", "records", "items", "rows"})
 		for _, o := range orders {
 			ord := firstNonEmpty(anyString(o["ordSerialNo"]), anyString(o["orderSerialNo"]), anyString(o["ordNo"]))
@@ -225,12 +279,56 @@ func firstCourse(c *util.Client, sess lexueSession) (courseSel, error) {
 				sid := firstNonEmpty(anyString(sub["subjectId"]), anyString(sub["subject_id"]), anyString(sub["id"]))
 				name := firstNonEmpty(anyString(sub["subjectName"]), anyString(sub["name"]), anyString(sub["courseName"]), anyString(sub["title"]), product)
 				if sid != "" {
-					return courseSel{subjectID: sid, ordSerialNo: ord, orderID: orderID, title: name, packageID: anyString(sub["packageId"]), merchantID: mid}, nil
+					if product != "" && name != "" && !strings.Contains(product, name) {
+						name = product + "-" + name
+					}
+					key := strings.Join([]string{mid, sid, ord, orderID}, "\x00")
+					if seen[key] {
+						continue
+					}
+					seen[key] = true
+					price := extractPrice(o)
+					if price == 0 {
+						price = defaultHiddenPrice
+					}
+					raw := map[string]any{
+						"raw_order":    o,
+						"raw_subject":  sub,
+						"merchantName": merchantName,
+					}
+					out = append(out, courseSel{
+						subjectID:   sid,
+						ordSerialNo: ord,
+						orderID:     orderID,
+						title:       name,
+						packageID:   firstNonEmpty(anyString(sub["packageId"]), anyString(o["packageId"])),
+						merchantID:  firstNonEmpty(anyString(sub["merchantId"]), anyString(sub["merchant_id"]), mid),
+						price:       price,
+						purchased:   true,
+						raw:         raw,
+					})
 				}
 			}
 		}
 	}
-	return courseSel{}, fmt.Errorf("lexueyun course list is empty")
+	return out
+}
+
+func mergeCourseSel(primary, listed courseSel) courseSel {
+	primary.subjectID = firstNonEmpty(primary.subjectID, listed.subjectID)
+	primary.ordSerialNo = firstNonEmpty(primary.ordSerialNo, listed.ordSerialNo)
+	primary.orderID = firstNonEmpty(primary.orderID, listed.orderID)
+	primary.title = firstNonEmpty(primary.title, listed.title)
+	primary.packageID = firstNonEmpty(primary.packageID, listed.packageID)
+	primary.merchantID = firstNonEmpty(primary.merchantID, listed.merchantID)
+	if primary.price == 0 {
+		primary.price = listed.price
+	}
+	primary.purchased = primary.purchased || listed.purchased
+	if primary.raw == nil {
+		primary.raw = listed.raw
+	}
+	return primary
 }
 
 func fillSubjectDetail(c *util.Client, sess lexueSession, sel *courseSel) error {
@@ -238,10 +336,16 @@ func fillSubjectDetail(c *util.Client, sess lexueSession, sel *courseSel) error 
 	if err != nil {
 		return err
 	}
-	var resp subjectDetailResp
-	if json.Unmarshal(body, &resp) == nil {
-		sel.packageID = firstNonEmpty(sel.packageID, anyString(resp.Data.PackageID))
-		sel.merchantID = firstNonEmpty(sel.merchantID, anyString(resp.Data.MerchantID))
+	var resp struct {
+		Data map[string]any `json:"data"`
+	}
+	if json.Unmarshal(body, &resp) == nil && resp.Data != nil {
+		sel.packageID = firstNonEmpty(sel.packageID, anyString(resp.Data["packageId"]))
+		sel.merchantID = firstNonEmpty(sel.merchantID, anyString(resp.Data["merchantId"]))
+		sel.title = firstNonEmpty(sel.title, anyString(resp.Data["subjectName"]), anyString(resp.Data["courseName"]), anyString(resp.Data["title"]), anyString(resp.Data["name"]))
+		if sel.price == 0 {
+			sel.price = extractPrice(resp.Data)
+		}
 	}
 	return nil
 }
@@ -262,7 +366,7 @@ func getLessons(c *util.Client, sess lexueSession, sel courseSel) ([]resource, e
 }
 
 func resolveLesson(c *util.Client, sess lexueSession, sel courseSel, res resource, les lesson, ri, li int) (*extractor.MediaInfo, error) {
-	roomID := firstNonEmpty(anyString(les.LivePlaybackID), anyString(les.LiveLessonID))
+	roomID := lessonRoomID(les)
 	if roomID == "" {
 		return nil, fmt.Errorf("lexueyun lesson has empty room id")
 	}

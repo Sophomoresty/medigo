@@ -1,12 +1,17 @@
 {
   "subject": {
-    "data": []
+    "data": [
+      {
+        "stdSubject": "math"
+      }
+    ]
   },
   "live_list": {
     "data": [
       {
         "stdCourseId": "1001",
         "courseName": "Speiyou Mock Course",
+        "price": "￥199",
         "stdSubject": "math",
         "stdGrade": "7",
         "stdClassId": "55",
@@ -26,7 +31,8 @@
       {
         "stdCourseId": "1001",
         "courseName": "Speiyou Mock Course",
-        "stdSubject": "math"
+        "stdSubject": "math",
+        "price": "￥199"
       }
     ]
   },

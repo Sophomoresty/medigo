@@ -52,6 +52,9 @@ func (r *Renrenjiang) Extract(rawURL string, opts *extractor.ExtractOpts) (*extr
 	c.SetCookieJar(opts.Cookies)
 	auth := authFromJar(opts.Cookies)
 	h := headers(auth.Token)
+	if err := validateLogin(c, h, auth); err != nil {
+		return nil, err
+	}
 	if cid == "" {
 		courses, _ := getCourseList(c, h, auth.UserID)
 		if len(courses) > 0 {
@@ -64,21 +67,25 @@ func (r *Renrenjiang) Extract(rawURL string, opts *extractor.ExtractOpts) (*extr
 	if courseType == "activity" {
 		detail, _ := requestJSON(c, "GET", fmt.Sprintf(activity_detail_api, cid), map[string]string{"u": auth.UserID}, nil, h)
 		title := first(textAt(unwrapMap(detail), "title", "name"), "renrenjiang_"+cid)
+		purchased := isActivityPurchased(c, h, auth.UserID, cid, unwrapMap(detail))
 		entry, err := resolveActivity(c, h, auth.UserID, cid, title)
 		if err != nil {
 			return nil, err
 		}
 		docs := getDocuments(c, h, auth.UserID, cid, false)
-		entry.Extra = mergeExtra(entry.Extra, map[string]any{"activity_detail": detail, "documents": docs})
+		entry.Extra = mergeExtra(entry.Extra, map[string]any{"activity_detail": detail, "documents": docs, "price": safeFloat(textAt(unwrapMap(detail), "price")), "purchased": purchased})
 		docEntries := documentEntries(docs, entry.Title, h)
 		if len(docEntries) > 0 {
 			entries := append([]*extractor.MediaInfo{entry}, docEntries...)
-			return &extractor.MediaInfo{Site: "renrenjiang", Title: sanitize(title), Entries: dedupeEntries(entries), Extra: map[string]any{"activity_detail": detail, "documents": docs}}, nil
+			return &extractor.MediaInfo{Site: "renrenjiang", Title: sanitize(title), Entries: dedupeEntries(entries), Extra: map[string]any{"activity_detail": detail, "documents": docs, "price": safeFloat(textAt(unwrapMap(detail), "price")), "purchased": purchased}}, nil
 		}
 		return entry, nil
 	}
 	detail, _ := requestJSON(c, "GET", fmt.Sprintf(column_detail_api, cid), map[string]string{"u": auth.UserID}, nil, h)
 	title := first(textAt(unwrapMap(detail), "title", "name"), "renrenjiang_"+cid)
+	columnDetail := unwrapMap(detail)
+	columnPrice := safeFloat(textAt(columnDetail, "price"))
+	columnPurchased := isColumnPurchased(c, h, auth.UserID, cid, columnDetail)
 	lessons, err := getColumnActivities(c, h, auth.UserID, cid)
 	if err != nil {
 		return nil, fmt.Errorf("renrenjiang column activities: %w", err)
@@ -103,7 +110,7 @@ func (r *Renrenjiang) Extract(rawURL string, opts *extractor.ExtractOpts) (*extr
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("renrenjiang: no playable activity streams or documents found")
 	}
-	return &extractor.MediaInfo{Site: "renrenjiang", Title: sanitize(title), Entries: dedupeEntries(entries), Extra: map[string]any{"course_id": cid, "course_type": courseType, "documents": courseDocs}}, nil
+	return &extractor.MediaInfo{Site: "renrenjiang", Title: sanitize(title), Entries: dedupeEntries(entries), Extra: map[string]any{"course_id": cid, "course_type": courseType, "documents": courseDocs, "price": columnPrice, "purchased": columnPurchased}}, nil
 }
 
 type authInfo struct{ Token, UserID string }
@@ -111,6 +118,27 @@ type courseRef struct{ ID, Type, Title string }
 type playInfo struct {
 	URL  string
 	Size int64
+}
+
+func validateLogin(c *util.Client, h map[string]string, auth authInfo) error {
+	if strings.TrimSpace(auth.Token) == "" {
+		return fmt.Errorf("renrenjiang requires Authorization token")
+	}
+	resp, err := requestJSON(c, "GET", "/api/v3/account/get_user_info", map[string]string{"u": auth.UserID}, nil, h)
+	if err != nil {
+		return fmt.Errorf("renrenjiang login check: %w", err)
+	}
+	m := unwrapMap(resp)
+	if strings.EqualFold(textAt(m, "result"), "fail") {
+		return fmt.Errorf("renrenjiang login check failed")
+	}
+	if user := unwrapMap(m["user"]); len(user) > 0 {
+		return nil
+	}
+	if auth.UserID != "" {
+		return nil
+	}
+	return fmt.Errorf("renrenjiang login check returned no user")
 }
 
 func getCourseList(c *util.Client, h map[string]string, userID string) ([]courseRef, error) {
@@ -169,6 +197,49 @@ func getColumnActivities(c *util.Client, h map[string]string, userID, cid string
 	}
 	return out, nil
 }
+
+func isColumnPurchased(c *util.Client, h map[string]string, userID, columnID string, detail map[string]any) bool {
+	if sameCreator(detail, userID) {
+		return true
+	}
+	resp, err := requestJSON(c, "GET", fmt.Sprintf(column_subscribed_api, columnID), map[string]string{"u": userID}, nil, h)
+	if err == nil {
+		m := unwrapMap(resp)
+		if strings.EqualFold(textAt(m, "result"), "ok") || truthy(m["is_subscribed"]) || truthy(m["subscribed"]) {
+			return true
+		}
+	}
+	return safeFloat(textAt(detail, "price")) <= 0
+}
+
+func isActivityPurchased(c *util.Client, h map[string]string, userID, activityID string, detail map[string]any) bool {
+	if sameCreator(detail, userID) {
+		return true
+	}
+	if columnID := first(textAt(detail, "bind_column_id", "column_id"), textAt(unwrapMap(detail["column"]), "id", "column_id")); columnID != "" && isColumnPurchased(c, h, userID, columnID, unwrapMap(detail["column"])) {
+		return true
+	}
+	return refreshActivityPayState(c, h, userID, activityID, detail)
+}
+
+func refreshActivityPayState(c *util.Client, h map[string]string, userID, activityID string, detail map[string]any) bool {
+	state, err := requestJSON(c, "GET", fmt.Sprintf(activity_pay_api, activityID), map[string]string{"u": userID}, nil, h)
+	if err == nil && truthy(unwrapMap(state)["is_pay"]) {
+		return true
+	}
+	if safeFloat(textAt(detail, "price")) <= 0 {
+		_, _ = requestJSON(c, "POST", fmt.Sprintf(activity_reservation_api, activityID), map[string]string{"u": userID}, map[string]string{}, h)
+		state, err = requestJSON(c, "GET", fmt.Sprintf(activity_pay_api, activityID), map[string]string{"u": userID}, nil, h)
+		return err == nil && (truthy(unwrapMap(state)["is_pay"]) || !strings.EqualFold(textAt(unwrapMap(state), "result"), "fail"))
+	}
+	return false
+}
+
+func sameCreator(detail map[string]any, userID string) bool {
+	creatorID := first(textAt(unwrapMap(detail["creator"]), "id", "user_id"), textAt(detail, "creator_id", "user_id"))
+	return creatorID != "" && userID != "" && creatorID == userID
+}
+
 func resolveActivity(c *util.Client, h map[string]string, userID, activityID, title string) (*extractor.MediaInfo, error) {
 	play := resolveActivityStream(c, h, userID, activityID)
 	if play.URL == "" {

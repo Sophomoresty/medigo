@@ -2,10 +2,13 @@
 package chaoge
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/Sophomoresty/mediago/internal/extractor"
@@ -40,6 +43,12 @@ var (
 	ccInfoBlockRe = regexp.MustCompile(`(?s)let\s+ccInfo\s*=\s*\{([\s\S]*?)\}`)
 	ccKeyValueRe  = regexp.MustCompile(`(\w+)\s*:\s*['"]([^'"]*)['"]`)
 	titleCleanRe  = regexp.MustCompile(`[\\/:*?"<>|\r\n\t]+`)
+	htmlCommentRe = regexp.MustCompile(`(?s)<!--[\s\S]*?-->`)
+	priceRes      = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)<span>\s*RMB\s*</span>\s*<span>\s*([0-9]+(?:\.[0-9]+)?)\s*</span>`),
+		regexp.MustCompile(`(?i)price_disc['"]?\s*[:=]\s*['"]?([0-9]+(?:\.[0-9]+)?)`),
+		regexp.MustCompile(`(?i)price['"]?\s*[:=]\s*['"]?([0-9]+(?:\.[0-9]+)?)`),
+	}
 )
 
 func init() {
@@ -70,6 +79,7 @@ func (s *Chaoge) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 	if err != nil {
 		return nil, err
 	}
+	courseInfo := selectedCourseInfo(detail, cid)
 	items := collectCourseItems(detail, cid)
 	items = append(items, findCourseListMatches(myCourses, cid)...)
 	items = append(items, fetchMyCourseItems(c, headers, cid)...)
@@ -102,7 +112,11 @@ func (s *Chaoge) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 	if title == "" {
 		title = "chaoge_" + cid
 	}
-	return &extractor.MediaInfo{Site: "chaoge", Title: title, Entries: entries}, nil
+	extra := map[string]any{"course_id": cid, "purchased": coursePurchased(courseInfo, myCourses, cid)}
+	if price, ok := fetchPublicPrice(c, headers, cid, courseInfo); ok {
+		extra["price"] = price
+	}
+	return &extractor.MediaInfo{Site: "chaoge", Title: title, Chapters: chaogeChapters(items), Entries: entries, Extra: extra}, nil
 }
 
 func parseCourseID(raw string) string {
@@ -316,7 +330,10 @@ func resolveVideoEntry(c *util.Client, headers map[string]string, item map[strin
 	}
 	play, err := shared.CssLcloudResolvePlayInfo(c, payload)
 	if err != nil {
-		return nil, err
+		play, err = legacyCssLcloudResolvePlayInfo(c, payload)
+		if err != nil {
+			return nil, err
+		}
 	}
 	extra := map[string]any{"course_id": courseID, "cc_info": ccInfo, "source_login_url": csslLoginURL, "source_play_url": csslPlayURL, "source_meta_url": csslMetaURL}
 	if manifest, err := rewriteManifestIfNeeded(c, play.VideoURL, referer); err != nil {
@@ -370,12 +387,106 @@ func rewriteManifestIfNeeded(c *util.Client, videoURL, referer string) (string, 
 	return shared.CssLcloudRewriteM3U8Keys(c, manifest, referer)
 }
 
+func legacyCssLcloudResolvePlayInfo(c *util.Client, p shared.CssLcloudPayload) (*shared.CssLcloudPlayInfo, error) {
+	accountID := firstNonEmpty(p.AccessID, p.UserID)
+	recordID := p.RecordID
+	if accountID == "" || recordID == "" {
+		return nil, fmt.Errorf("csslcloud legacy: missing accountId/replayId")
+	}
+	loginPayload := map[string]any{
+		"tpl":           20,
+		"userName":      firstNonEmpty(p.ViewerName, p.UserID, p.LiveRoomID, accountID),
+		"deviceVersion": "3.21.0",
+		"deviceType":    "h5-pc",
+		"replayId":      recordID,
+		"accountId":     accountID,
+	}
+	if p.ViewerToken != "" {
+		loginPayload["userToken"] = p.ViewerToken
+	}
+	body, _ := json.Marshal(loginPayload)
+	headers := map[string]string{
+		"Accept":       "application/json, text/plain, */*",
+		"Content-Type": "application/json;charset=UTF-8",
+		"Origin":       csslOrigin,
+		"Referer":      csslOrigin + "/",
+	}
+	resp, err := c.Post(csslLoginURL, bytes.NewReader(body), headers)
+	if err != nil {
+		return nil, fmt.Errorf("csslcloud legacy login: %w", err)
+	}
+	defer resp.Body.Close()
+	rawLogin, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("csslcloud legacy login read: %w", err)
+	}
+	var login map[string]any
+	if err := json.Unmarshal(rawLogin, &login); err != nil {
+		return nil, fmt.Errorf("csslcloud legacy login parse: %w", err)
+	}
+	token := firstNonEmpty(
+		firstString(asMap(asMap(login["data"])["user"]), "token"),
+		firstString(asMap(login["data"]), "token"),
+		firstString(asMap(login["datas"]), "token", "sessionId"),
+	)
+	if token == "" {
+		return nil, fmt.Errorf("csslcloud legacy login: empty token")
+	}
+	playHeaders := map[string]string{
+		"Accept":     "application/json, text/plain, */*",
+		"Origin":     csslOrigin,
+		"Referer":    csslOrigin + "/",
+		"X-HD-Token": token,
+	}
+	u, _ := url.Parse(csslPlayURL)
+	q := u.Query()
+	q.Set("tpl", "20")
+	q.Set("terminal", "3")
+	q.Set("deviceVersion", "3.21.0")
+	q.Set("deviceType", "h5-pc")
+	q.Set("replayId", recordID)
+	q.Set("accountId", accountID)
+	u.RawQuery = q.Encode()
+	playBody, err := c.GetString(u.String(), playHeaders)
+	if err != nil {
+		return nil, fmt.Errorf("csslcloud legacy play: %w", err)
+	}
+	var playRoot map[string]any
+	if err := json.Unmarshal([]byte(playBody), &playRoot); err != nil {
+		return nil, fmt.Errorf("csslcloud legacy play parse: %w", err)
+	}
+	videos := legacyCssLcloudVideos(playRoot)
+	if len(videos) == 0 {
+		return nil, fmt.Errorf("csslcloud legacy play: no video streams")
+	}
+	best := videos[0]
+	for _, v := range videos[1:] {
+		if v.URL != "" && v.Definition > best.Definition {
+			best = v
+		}
+	}
+	return &shared.CssLcloudPlayInfo{SessionID: token, VideoURL: best.URL, VideoList: videos}, nil
+}
+
+func legacyCssLcloudVideos(root map[string]any) []shared.CssLcloudStreamInfo {
+	var out []shared.CssLcloudStreamInfo
+	walkAny(root, func(m map[string]any) {
+		u := firstNonEmpty(firstString(m, "primary", "url", "playUrl", "play_url", "videoUrl", "video_url"), firstString(m, "secondary"))
+		if u == "" {
+			return
+		}
+		out = append(out, shared.CssLcloudStreamInfo{URL: normalizeURL(u), Definition: intValue(firstNonEmpty(firstString(m, "definition"), firstString(m, "quality"), firstString(m, "code")), 0)})
+	})
+	return out
+}
+
 func collectCourseItems(root map[string]any, cid string) []map[string]any {
 	var out []map[string]any
 	walkAny(root, func(m map[string]any) {
 		if firstString(m, "id", "course_id") != "" || hasAny(m, "cc_live_id", "cc_lubo_record_id", "zhibo_url", "file_url", "path") {
 			out = append(out, m)
 		}
+		out = append(out, embeddedFileItems(m)...)
 	})
 	return append([]map[string]any{{"id": cid, "course_id": cid}}, out...)
 }
@@ -388,6 +499,155 @@ func courseTitle(resp map[string]any) string {
 		}
 	}
 	return ""
+}
+
+func selectedCourseInfo(detail map[string]any, cid string) map[string]any {
+	data := asMap(detail["data"])
+	candidates := []map[string]any{data, asMap(data["course_info"]), asMap(data["course"]), asMap(data["info"])}
+	var first map[string]any
+	for _, m := range candidates {
+		if len(m) == 0 {
+			continue
+		}
+		if len(first) == 0 {
+			first = m
+		}
+		if cid != "" && in(firstString(m, "course_id", "id"), cid) {
+			return m
+		}
+	}
+	var matched map[string]any
+	walkAny(detail, func(m map[string]any) {
+		if len(matched) == 0 && cid != "" && in(firstString(m, "course_id", "id"), cid) {
+			matched = m
+		}
+	})
+	if len(matched) > 0 {
+		return matched
+	}
+	return first
+}
+
+func coursePurchased(course map[string]any, myCourses []map[string]any, cid string) bool {
+	for _, key := range []string{"is_bought", "is_buy", "isBuy", "is_paid", "isPaid", "purchased", "has_buy"} {
+		if truthy(course[key]) {
+			return true
+		}
+	}
+	for _, it := range myCourses {
+		if firstString(it, "course_id", "id") == cid || firstString(it, "course_pid", "pid", "parent_id") == cid {
+			return true
+		}
+	}
+	return false
+}
+
+func fetchPublicPrice(c *util.Client, headers map[string]string, cid string, course map[string]any) (float64, bool) {
+	if price, ok := courseInfoPrice(course); ok {
+		return price, true
+	}
+	if cid == "" {
+		return 0, false
+	}
+	body, err := c.GetString(fmt.Sprintf(publicCourseURL, url.QueryEscape(cid)), headers)
+	if err != nil {
+		return 0, false
+	}
+	body = htmlCommentRe.ReplaceAllString(body, "")
+	for _, re := range priceRes {
+		m := re.FindStringSubmatch(body)
+		if len(m) < 2 {
+			continue
+		}
+		price := parsePrice(m[1])
+		if price > 0 {
+			return price, true
+		}
+	}
+	return 0, false
+}
+
+func courseInfoPrice(course map[string]any) (float64, bool) {
+	if len(course) == 0 {
+		return 0, false
+	}
+	for _, key := range []string{"price_disc", "pre_discount_price", "time_limit_discount_money"} {
+		if _, ok := course[key]; !ok {
+			continue
+		}
+		if price := parsePrice(course[key]); price > 0 {
+			return price, true
+		}
+	}
+	for _, key := range []string{"price", "ori_price"} {
+		if _, ok := course[key]; !ok {
+			continue
+		}
+		price := parsePrice(course[key])
+		if price > 0 {
+			return price / 100, true
+		}
+		return 0, true
+	}
+	return 0, false
+}
+
+func embeddedFileItems(course map[string]any) []map[string]any {
+	seen := map[string]bool{}
+	var out []map[string]any
+	for _, key := range []string{"file", "file_json"} {
+		for _, item := range decodeFileItems(course[key]) {
+			fileURL := normalizeURL(firstString(item, "path", "url", "file_url", "file"))
+			name := firstString(item, "name", "title", "file_name")
+			dedupe := fileURL + "|" + name
+			if fileURL == "" || seen[dedupe] {
+				continue
+			}
+			seen[dedupe] = true
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func decodeFileItems(v any) []map[string]any {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case string:
+		var parsed any
+		if json.Unmarshal([]byte(x), &parsed) != nil {
+			return nil
+		}
+		return decodeFileItems(parsed)
+	case []any:
+		out := make([]map[string]any, 0, len(x))
+		for _, it := range x {
+			if m := asMap(it); len(m) > 0 {
+				out = append(out, m)
+			}
+		}
+		return out
+	case map[string]any:
+		return []map[string]any{x}
+	default:
+		return nil
+	}
+}
+
+func chaogeChapters(items []map[string]any) []extractor.Chapter {
+	var chapters []extractor.Chapter
+	seen := map[string]bool{}
+	for _, item := range items {
+		title := cleanTitle(firstString(item, "course_name", "title", "name"))
+		id := firstString(item, "course_id", "id")
+		if title == "" || id == "" || seen[id] || !looksFolder(item) {
+			continue
+		}
+		seen[id] = true
+		chapters = append(chapters, extractor.Chapter{Title: title, URL: fmt.Sprintf(enterCourseURL, url.QueryEscape(id)), Index: len(chapters) + 1})
+	}
+	return chapters
 }
 
 func csslStreams(play *shared.CssLcloudPlayInfo, referer string) map[string]extractor.Stream {
@@ -478,6 +738,14 @@ func intValue(v any, def int) int {
 		return i
 	}
 	return def
+}
+func parsePrice(v any) float64 {
+	s := strings.TrimSpace(fmt.Sprint(v))
+	if s == "" || s == "<nil>" {
+		return 0
+	}
+	f, _ := strconv.ParseFloat(s, 64)
+	return f
 }
 func in(v string, set ...string) bool {
 	for _, s := range set {

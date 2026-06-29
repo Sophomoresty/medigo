@@ -80,6 +80,14 @@ type episodeNode struct {
 	Raw   map[string]any
 }
 
+type fenbiVideoCandidate struct {
+	URL    string
+	Size   int64
+	Rank   int
+	Raw    map[string]any
+	Source string
+}
+
 func (f *Fenbi) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.MediaInfo, error) {
 	if opts == nil || opts.Cookies == nil {
 		return nil, fmt.Errorf("fenbi requires login cookies (use --cookies or --cookies-from-browser)")
@@ -145,18 +153,22 @@ func resolveVisibleLectures(c *util.Client, headers map[string]string) ([]*extra
 		title := firstNonEmpty(pickTitle(lecture), "fenbi_"+lectureID)
 		childEntries, resolvedTitle, err := resolveLecture(c, headers, requestIDs{Prefix: prefix, LectureID: lectureID})
 		if err == nil && len(childEntries) > 0 {
+			extra := map[string]any{"prefix": prefix, "lecture_id": lectureID, "raw": lecture}
+			applyPaymentExtra(extra, lecture)
 			entries = append(entries, &extractor.MediaInfo{
 				Site:    "fenbi",
 				Title:   util.SanitizeFilename(firstNonEmpty(resolvedTitle, title)),
 				Entries: childEntries,
-				Extra:   map[string]any{"prefix": prefix, "lecture_id": lectureID, "raw": lecture},
+				Extra:   extra,
 			})
 			continue
 		}
+		extra := map[string]any{"prefix": prefix, "lecture_id": lectureID, "raw": lecture}
+		applyPaymentExtra(extra, lecture)
 		entries = append(entries, &extractor.MediaInfo{
 			Site:  "fenbi",
 			Title: util.SanitizeFilename(title),
-			Extra: map[string]any{"prefix": prefix, "lecture_id": lectureID, "raw": lecture},
+			Extra: extra,
 		})
 	}
 	return entries, nil
@@ -278,7 +290,7 @@ func resolveLecture(c *util.Client, headers map[string]string, ids requestIDs) (
 	for _, payload := range payloads {
 		title = firstNonEmpty(pickTitle(payload), title)
 		if media := findMediaURL(payload); media != "" {
-			direct = append(direct, mediaInfo(firstNonEmpty(pickTitle(payload), ids.LectureID), media, headers))
+			direct = append(direct, mediaInfo(firstNonEmpty(pickTitle(payload), ids.LectureID), media, 0, headers))
 		}
 		nodes = append(nodes, collectEpisodes(payload)...)
 	}
@@ -295,7 +307,7 @@ func resolveLecture(c *util.Client, headers map[string]string, ids requestIDs) (
 			continue
 		}
 		seen[node.ID] = true
-		entry, files, err := resolveEpisode(c, headers, ids.Prefix, node.ID, node.Title, node.Raw, map[string]any{"lecture_id": ids.LectureID, "content_id": ids.LectureID})
+		entry, files, err := resolveEpisode(c, headers, ids.Prefix, node.ID, node.Title, node.Raw, map[string]any{"lecture_id": ids.LectureID, "content_id": ids.LectureID, "lecture_title": title})
 		if err == nil {
 			entries = append(entries, entry)
 			entries = append(entries, files...)
@@ -450,22 +462,33 @@ func resolveEpisode(c *util.Client, headers map[string]string, prefix, episodeID
 	}
 	metapath, hasMetapath := loadMetapath(c, headers, videoInfo)
 	for _, payload := range payloads {
-		if media := findMediaURL(payload); media != "" {
+		media, mediaSize, mediaRaw := pickVideoURLFromMeta(payload)
+		if media != "" {
 			title := util.SanitizeFilename(firstNonEmpty(pickTitle(payload), fallbackTitle, episodeID))
-			entry := mediaInfo(title, media, headers)
+			entry := mediaInfo(title, media, mediaSize, headers)
 			files := materialEntries(c, headers, videoInfo, payloads)
 			if board := metapathEntry(title, metapath, headers); board != nil {
 				files = append(files, board)
 			}
+			if entry.Extra == nil {
+				entry.Extra = map[string]any{}
+			}
 			if len(files) > 0 {
-				entry.Extra = map[string]any{"materials": materialSummaries(files)}
+				entry.Extra["materials"] = materialSummaries(files)
+			}
+			entry.Extra["episode_id"] = episodeID
+			entry.Extra["prefix"] = prefix
+			if rawRank := videoQualityRank(mediaRaw); rawRank > 0 {
+				entry.Extra["quality_rank"] = rawRank
+			}
+			if len(mediaRaw) > 0 {
+				entry.Extra["media_meta"] = mediaRaw
 			}
 			if hasMetapath {
-				if entry.Extra == nil {
-					entry.Extra = map[string]any{}
-				}
 				entry.Extra["metapath"] = metapathSummary(metapath)
 			}
+			applyPaymentExtra(entry.Extra, videoInfo)
+			applyPaymentExtra(entry.Extra, payload)
 			return entry, files, nil
 		}
 	}

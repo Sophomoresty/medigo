@@ -102,6 +102,7 @@ func fetchMyCoursePayloads(c *util.Client, h map[string]string) []any {
 	}
 	payloads = append(payloads, fetchJSONPayloads(c, h, []apiReq{{urlTrainingAPI, map[string]string{"method": "study.index", "type": "1"}}})...)
 	payloads = append(payloads, fetchPagedJSONPayloads(c, h, urlOrderListAPI, map[string]string{"pageSize": "100"}, 20, 100)...)
+	payloads = append(payloads, fetchPagedJSONPayloads(c, h, urlOrderListLegacyAPI, map[string]string{"pageSize": "100", "status": "3"}, 20, 100)...)
 	return payloads
 }
 
@@ -193,7 +194,7 @@ func courseRefsFromHTML(text string) []courseRef {
 				continue
 			}
 			seen[key] = true
-			out = append(out, courseRef{ID: "train_" + trainID, TrainID: trainID, IsTraining: true, Title: title, URL: rawURL})
+			out = append(out, courseRef{ID: "train_" + trainID, TrainID: trainID, IsTraining: true, Title: title, URL: rawURL, Price: defaultCoursePrice})
 			continue
 		}
 		cid := courseIDFromURL(rawURL)
@@ -205,7 +206,7 @@ func courseRefsFromHTML(text string) []courseRef {
 			continue
 		}
 		seen[key] = true
-		out = append(out, courseRef{ID: cid, Title: title, URL: rawURL})
+		out = append(out, courseRef{ID: cid, Title: title, URL: rawURL, Price: defaultCoursePrice})
 	}
 	return out
 }
@@ -218,7 +219,8 @@ func courseRefFromMap(m map[string]any) courseRef {
 		if title == "" {
 			return courseRef{}
 		}
-		return courseRef{ID: "train_" + trainID, TrainID: trainID, IsTraining: true, Title: cleanText(title), URL: firstNonEmpty(rawURL, fmt.Sprintf(urlWejobCourse, trainID)), Price: textValue(m, "price", "train_price", "trainPrice", "sale_price", "salePrice", "pay_price", "payPrice", "original_price", "originalPrice"), Raw: m}
+		price := firstNonEmpty(normalizePriceValue(textValue(m, "price", "train_price", "trainPrice", "sale_price", "salePrice", "pay_price", "payPrice", "original_price", "originalPrice")), defaultCoursePrice)
+		return courseRef{ID: "train_" + trainID, TrainID: trainID, IsTraining: true, Title: cleanText(title), URL: firstNonEmpty(rawURL, fmt.Sprintf(urlWejobCourse, trainID)), Price: price, Raw: m}
 	}
 	cid := firstNonEmpty(courseIDFromURL(rawURL), textValue(m, "course_id", "courseId"))
 	if cid == "" {
@@ -233,7 +235,8 @@ func courseRefFromMap(m map[string]any) courseRef {
 	if title == "" {
 		return courseRef{}
 	}
-	return courseRef{ID: cid, Title: cleanText(title), URL: firstNonEmpty(rawURL, fmt.Sprintf(urlCourse, cid)), Price: textValue(m, "price", "course_price", "coursePrice", "pay_price", "payPrice"), Raw: m}
+	price := normalizePriceOrDefault(textValue(m, "price", "course_price", "coursePrice", "pay_price", "payPrice"))
+	return courseRef{ID: cid, Title: cleanText(title), URL: firstNonEmpty(rawURL, fmt.Sprintf(urlCourse, cid)), Price: price, Raw: m}
 }
 
 func courseRefEntries(courses []courseRef) []*extractor.MediaInfo {
@@ -249,9 +252,7 @@ func courseRefEntries(courses []courseRef) []*extractor.MediaInfo {
 			extra["course_id"] = c.ID
 			extra["type"] = "course"
 		}
-		if c.Price != "" {
-			extra["price"] = c.Price
-		}
+		extra["price"] = normalizePriceOrDefault(c.Price)
 		entries = append(entries, &extractor.MediaInfo{Site: "cto51", Title: title, Extra: extra})
 	}
 	return entries
@@ -451,7 +452,7 @@ func filesFromAny(v any, chapterTitle, defaultScope string) []fileRef {
 func fileRefsFromMap(m map[string]any, chapterTitle, defaultScope string) []fileRef {
 	var out []fileRef
 	scope := firstNonEmpty(textValue(m, "file_scope", "fileScope", "scope"), defaultScope, "material")
-	if pack := textValue(m, "packFileUrl", "pack_file_url"); pack != "" {
+	if pack := firstNonEmpty(textValue(m, "packFileUrl", "pack_file_url"), nestedFileURL(m["packFileUrl"]), nestedFileURL(m["pack_file_url"])); pack != "" {
 		out = append(out, buildFileRef(pack, firstNonEmpty(textValue(m, "packFileName", "pack_file_name"), "整课资料"), textValue(m, "packFileExt", "pack_file_ext", "file_ext", "fileExt"), "", chapterTitle, scope, m))
 	}
 	for _, key := range []string{"fileUrl", "file_url", "downloadUrl", "download_url", "downUrl", "attach_url", "attachUrl", "link", "href", "fileurl", "url"} {
@@ -502,6 +503,21 @@ func buildFileRef(rawURL, title, fmtv, lessonID, chapterTitle, scope string, raw
 func fileEntry(c *util.Client, f fileRef, h map[string]string, index int) (*extractor.MediaInfo, error) {
 	if f.URL == "" {
 		return nil, fmt.Errorf("51cto file: empty url")
+	}
+	if looksLikeFileDownloadURL(f.URL) || !isFileFormat(f.Format) || f.Title == "" {
+		meta := resolveFileDownloadMeta(c, f.URL, h)
+		if meta.URL != "" {
+			f.URL = meta.URL
+		}
+		if f.Title == "" && meta.Title != "" {
+			f.Title = meta.Title
+		}
+		if !isFileFormat(f.Format) && meta.Format != "" {
+			f.Format = meta.Format
+		}
+		if f.Size <= 0 && meta.Size > 0 {
+			f.Size = meta.Size
+		}
 	}
 	title := indexedFileTitle(index, firstNonEmpty(f.Title, path.Base(parsedPath(f.URL)), "资料"))
 	fmtv := strings.Trim(strings.ToLower(firstNonEmpty(f.Format, mediaFormat(f.URL), "bin")), ". ")

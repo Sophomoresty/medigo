@@ -34,15 +34,28 @@ const (
 	pcSourceURL       = "https://%s/xe.course.business.video.detail_info.get/2.0.0"
 	liveURL           = "https://%s%s/_alive/v3/get_lookback_url?app_id=%s&alive_id=%s&hls_support=1"
 	protectedLiveURL  = "https://%s%s/_alive/v3/get_lookback_list?app_id=%s&alive_id=%s&protection=1&client=6"
+	liveTextTabURL    = "https://%s%s/_alive/tab/text?app_id=%s&alive_id=%s"
 	pcLiveURL         = "https://%s/_alive/api/alive/xe.alive.page.get/1.0.0?app_id=%s"
+	pptListURL        = "https://%s%s/_alive/v2/get_courseware_records?alive_id=%s"
 	audioURL          = "https://%s%s/xe.course.business.audio.info.get/2.0.0"
 	pcAudioURL        = "https://%s/xe.course.business.audio.info.get/2.0.0"
 	textURL           = "https://%s%s/xe.course.business.get.detail/2.0.0"
 	pcTextURL         = "https://%s/xe.course.business.get.detail/2.0.0"
 	ebookURL          = "https://%s%s/xe.course.business.ebook.info/2.0.0"
 	pcEbookURL        = "https://%s/xe.course.business.ebook.info/2.0.0"
+	htmlVideoURL      = "https://iframe.xiaoeknow.com/api/richtext/get_video_data"
+	htmlAudioURL      = "https://iframe.xiaoeknow.com/api/richtext/get_audio_data"
 	fileURL           = "https://%s%s/xe.course.business.courseware_list.get/2.0.0"
 	pcFileURL         = "https://%s/xe.course.business.courseware_list.get/2.0.0"
+	purchasedURL      = "https://%s%s/xe.course.business.resource.available.get/2.0.0"
+	pcPurchasedURL    = "https://%s/xe.course.business.resource.available.get/2.0.0"
+	newPurchasedURL   = "https://%s%s/xe.course.business.subscribe.check.get/2.0.0"
+	pcNewPurchasedURL = "https://%s/xe.course.business.subscribe.check.get/2.0.0"
+	priceURL          = "https://%s%s/xe.course.business.goods.info.get/2.0.0"
+	pcPriceURL        = "https://%s/xe.course.business.goods.info.get/2.0.0"
+	activityPriceURL  = "https://%s%s/xe.marketing.basic.activity.info/1.0.0"
+	orderURL          = "https://%s%s/xe.transaction.order.list.get/1.0.0"
+	pcOrderURL        = "https://%s/api/xe.shop.purchased.get/1.0.0?page_index=1&page_size=99"
 	clockIntroURL     = "https://%s%s/punch_card/get_clock_introduction"
 	clockTreeURL      = "https://%s%s/punch_card/get_chapter_tree_list"
 	clockChapterURL   = "https://%s%s/punch_card/get_chapter_detail"
@@ -82,10 +95,12 @@ func (x *Xiaoetech) Extract(rawURL string, opts *extractor.ExtractOpts) (*extrac
 	ctx := parseCtx(rawURL)
 	ctx = enrichFromHTML(c, opts.Cookies, ctx, rawURL)
 	items := []xetItem{}
+	loginChecked := false
 	if ctx.cid != "" {
 		items = append(items, xetItem{id: ctx.cid, title: firstNonEmpty(ctx.title, ctx.cid), typ: ctx.typ, appID: ctx.appID, userID: ctx.userID, pageURL: rawURL, raw: map[string]any{"resource_id": ctx.cid, "resource_type": ctx.typ, "app_id": ctx.appID}})
 	}
 	if listed, err := fetchCourseList(c, opts.Cookies); err == nil {
+		loginChecked = true
 		items = append(items, listed...)
 	} else if ctx.cid == "" {
 		return nil, err
@@ -94,17 +109,18 @@ func (x *Xiaoetech) Extract(rawURL string, opts *extractor.ExtractOpts) (*extrac
 	blockedReasons := []string{}
 	seenURL, seenItem := map[string]bool{}, map[string]bool{}
 	var processItem func(xetItem, bool)
-	addEntry := func(it xetItem) {
+	addEntry := func(it xetItem) bool {
 		u, extra := resolveItem(c, opts.Cookies, ctx.withItem(it), it)
 		if reason := val(extra, "blocked_reason"); reason != "" {
 			blockedReasons = append(blockedReasons, reason)
-			return
+			return false
 		}
 		if u == "" || seenURL[u] {
-			return
+			return false
 		}
 		seenURL[u] = true
 		entries = append(entries, media(firstNonEmpty(it.title, ctx.title, it.id), u, extra))
+		return true
 	}
 	processItem = func(it xetItem, topLevel bool) {
 		key := it.id + "|" + normType(it.typ)
@@ -119,6 +135,9 @@ func (x *Xiaoetech) Extract(rawURL string, opts *extractor.ExtractOpts) (*extrac
 			return
 		}
 		addEntry(it)
+		for _, child := range supplementalItems(c, opts.Cookies, ctx.withItem(it), it) {
+			processItem(child, false)
+		}
 	}
 	for _, it := range items {
 		processItem(it, true)
@@ -129,7 +148,20 @@ func (x *Xiaoetech) Extract(rawURL string, opts *extractor.ExtractOpts) (*extrac
 		}
 		return nil, fmt.Errorf("xiaoetech: no playable URL resolved from source APIs")
 	}
-	return &extractor.MediaInfo{Site: "xiaoetech", Title: firstNonEmpty(ctx.title, "xiaoetech"), Entries: entries}, nil
+	metaCtx := ctx
+	if ctx.cid != "" {
+		for _, it := range items {
+			if it.id == ctx.cid {
+				metaCtx = ctx.withItem(it)
+				break
+			}
+		}
+	}
+	extra := map[string]any{"course_id": ctx.cid, "app_id": metaCtx.appID, "resource_type": metaCtx.typ, "login_checked": loginChecked}
+	for k, v := range fetchEntitlement(c, opts.Cookies, metaCtx) {
+		extra[k] = v
+	}
+	return &extractor.MediaInfo{Site: "xiaoetech", Title: firstNonEmpty(ctx.title, "xiaoetech"), Entries: entries, Extra: compactMap(extra)}, nil
 }
 
 func (c xetCtx) withItem(it xetItem) xetCtx {

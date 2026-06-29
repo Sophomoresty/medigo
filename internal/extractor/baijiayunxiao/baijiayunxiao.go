@@ -460,7 +460,16 @@ func resolveLiveEnter(c *util.Client, rawURL string, headers map[string]string) 
 	if liveID == "" || ticket == "" {
 		return "", nil
 	}
-	payload := fmt.Sprintf(`{"ticket":"%s","liveId":"%s"}`, ticket, liveID)
+	var payloadBuf bytes.Buffer
+	enc := json.NewEncoder(&payloadBuf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(struct {
+		Ticket string `json:"ticket"`
+		LiveID string `json:"liveId"`
+	}{Ticket: ticket, LiveID: liveID}); err != nil {
+		return "", err
+	}
+	payload := strings.TrimSpace(payloadBuf.String())
 	timestamp := fmt.Sprint(time.Now().UnixMilli())
 	parts := []string{"timestamp=" + timestamp, "body=" + payload}
 	sort.Strings(parts)

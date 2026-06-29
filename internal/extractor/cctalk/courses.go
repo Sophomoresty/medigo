@@ -244,6 +244,25 @@ func (a *apiClient) currentUserID() string {
 	if a == nil || a.c == nil {
 		return ""
 	}
+	if header := firstNonEmpty(a.cookieHeader, cookieHeaderFromJar(a.jar)); header != "" {
+		cookies := parseCookieHeader(header)
+		for name, value := range cookies {
+			switch strings.ToLower(name) {
+			case "clubauth":
+				if uid := decodeClubAuthUID(value); uid != "" {
+					return uid
+				}
+			case "access_token", "accesstoken":
+				if uid := accessTokenUID(value); uid != "" {
+					return uid
+				}
+			case "hjuid", "uid", "userid", "user_id":
+				if onlyDigits(value) {
+					return value
+				}
+			}
+		}
+	}
 	for _, host := range []string{CCTALK_BASE_URL + "/", cctalkMobileURL + "/"} {
 		if parsed, err := url.Parse(host); err == nil && a.jar != nil {
 			for _, cookie := range a.jar.Cookies(parsed) {
@@ -309,10 +328,14 @@ func courseListMedia(siteTitle string, courses []map[string]any) *extractor.Medi
 		}
 		seen[key] = true
 		title := firstNonEmpty(textValue(course, "courseName", "seriesName", "groupName", "title", "name", "contentTitle"), key)
+		extra := map[string]any{"url": link, "course": course}
+		if price := priceInfo(course); len(price) > 0 {
+			extra["price"] = price
+		}
 		entries = append(entries, &extractor.MediaInfo{
 			Site:  "cctalk",
 			Title: util.SanitizeFilename(title),
-			Extra: map[string]any{"url": link, "course": course},
+			Extra: extra,
 		})
 	}
 	return &extractor.MediaInfo{Site: "cctalk", Title: util.SanitizeFilename(siteTitle), Entries: entries}

@@ -1,4 +1,18 @@
 {
+  "course_list": {
+    "code": 0,
+    "data": {
+      "list": [
+        {
+          "courseId": "1001",
+          "courseTitle": "Wendao Mock Course",
+          "coursePrice": 199,
+          "isBuy": 1,
+          "orderPlatform": 5
+        }
+      ]
+    }
+  },
   "detail": {
     "code": 0,
     "data": {
@@ -8,6 +22,16 @@
           "directoryName": "Wendao Mock Lesson",
           "videoUrl": "https://cdn.example.com/wendao.mp4",
           "directoryType": 0
+        },
+        {
+          "directoryName": "Wendao Audio Lesson",
+          "audioUrl": "https://cdn.example.com/wendao.mp3",
+          "directoryType": 2
+        },
+        {
+          "studyFileName": "Wendao PDF",
+          "studyFileUrl": "https://cdn.example.com/wendao.pdf",
+          "directoryType": 4
         }
       ]
     }

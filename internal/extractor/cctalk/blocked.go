@@ -42,6 +42,7 @@ func asBlocked(err error) (*blockedError, bool) {
 //   - _draw_cctalk_board_polyline:1485 (cv2.polylines :1514)
 //   - _cctalk_measure_text_gdi:1583 (ctypes.windll.user32/gdi32 :1594-1595)
 //   - mux via Mooc_Render.mux_render_mp4 (ffmpeg) :3920
+//
 // The m3u8-backed board case is NOT blocked: when the courseware payload
 // carries `m3u8s`, _prefer_v55_board_ocs_info:3223 returns the v55 ocs_info and
 // playback resolves to a normal m3u8 stream (Cctalk_Course :3240, :3214).
@@ -55,9 +56,10 @@ const boardLocalRenderReason = "cctalk 板书课时需要本地 OpenCV 渲染白
 //
 // Source: Cctalk_Course.pyc.1shot.cdc.py
 //   - _is_unavailable_replay:3067 (no media url :3076, no userSign/OCS :3078,
-//     no duration :3080, gated by forecastStartDate + reviewStatus 0/'' :3089)
+//     no duration :3080, gated by forecastStartDate + reviewStatus 0/” :3089)
 //   - download dispatch reuses _get_video_play_info + OCS for live and VOD
 //     alike (:3621, :3653, :3662); only :3636 skips an unavailable replay.
+//
 // The IM/login WebSocket (_message_gateway_socket, Cctalk_Base:79) is unrelated
 // to video; no ws://wss:// video stream exists in the source.
 const liveReplayUnavailableReason = "cctalk 直播课时回放尚未生成, 暂无可下载媒体 (源码 Cctalk_Course.pyc.1shot.cdc.py:3067 _is_unavailable_replay: 无 videoUrl/userSign/OCS/时长, forecastStartDate 存在且 reviewStatus 为 0/空)"

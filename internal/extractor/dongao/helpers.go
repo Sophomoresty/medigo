@@ -1,10 +1,15 @@
 package dongao
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"html"
+	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Sophomoresty/mediago/internal/extractor"
@@ -13,9 +18,14 @@ import (
 
 var (
 	directMediaRe = regexp.MustCompile(`(?i)https?:\\?/\\?/[^"'<>\s]+\.(?:m3u8|mp4|flv|mov|m4v|mp3|m4a)(?:\?[^"'<>\s]*)?`)
-	kvMediaRe     = regexp.MustCompile(`(?is)(?:source|url|path|playUrl|playbackUrl|video_url)\s*[:=]\s*["']([^"']+)["']`)
+	kvMediaRe     = regexp.MustCompile(`(?is)(?:cifMainSource|sdMainSource|hdMainSource|mainSource|videoSource|source|url|path|playUrl|playbackUrl|video_url)\s*[:=]\s*["']([^"']+)["']`)
 	anchorRe      = regexp.MustCompile(`(?is)<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)</a>`)
 	directFileRe  = regexp.MustCompile(`(?i)(?:https?:\\?/\\?/|/)[^"'<>\s]+\.(?:pdf|pptx?|docx?|xlsx?|xls|zip|rar|7z|caj)(?:\?[^"'<>\s]*)?`)
+)
+
+const (
+	dongaoAESKey = "j7hbgt2Jwn#7&86G"
+	dongaoAESIV  = "5268&yu34Nh&ka#x"
 )
 
 type resourceRef struct {
@@ -72,7 +82,7 @@ func collectLectureNodes(v any, fallbackTitle string) []lectureNode {
 func findMediaURL(v any) string {
 	switch x := v.(type) {
 	case map[string]any:
-		for _, k := range []string{"source", "mainSource", "videoSource", "url", "path", "playUrl", "playbackUrl", "video_url", "m3u8"} {
+		for _, k := range []string{"hdMainSource", "sdMainSource", "cifMainSource", "source", "mainSource", "videoSource", "url", "path", "playUrl", "playbackUrl", "video_url", "m3u8"} {
 			if s := normalizeURL(valueString(x, k)); isMediaURL(s) {
 				return s
 			}
@@ -173,11 +183,15 @@ func balancedJSON(s string) string {
 }
 
 func mediaInfo(title, mediaURL string, headers map[string]string) *extractor.MediaInfo {
+	return mediaInfoWithQuality(title, mediaURL, headers, "best")
+}
+
+func mediaInfoWithQuality(title, mediaURL string, headers map[string]string, quality string) *extractor.MediaInfo {
 	format := "mp4"
 	if strings.Contains(strings.ToLower(mediaURL), ".m3u8") {
 		format = "m3u8"
 	}
-	return &extractor.MediaInfo{Site: "dongao", Title: util.SanitizeFilename(title), Streams: map[string]extractor.Stream{"best": {Quality: "best", URLs: []string{mediaURL}, Format: format, Headers: headers}}}
+	return &extractor.MediaInfo{Site: "dongao", Title: util.SanitizeFilename(title), Streams: map[string]extractor.Stream{"best": {Quality: firstNonEmpty(quality, "best"), URLs: []string{mediaURL}, Format: format, NeedMerge: format == "m3u8", Headers: cloneHeaders(headers)}}}
 }
 
 func collectResourceRefsFromText(text, baseURL string) []resourceRef {
@@ -482,4 +496,404 @@ func appendQuery(raw string, query url.Values) string {
 		sep = "&"
 	}
 	return raw + sep + query.Encode()
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func parseListenParam(lectureHTML string) map[string]any {
+	for _, raw := range listenParamCandidates(lectureHTML) {
+		if parsed := parseLooseJSONObject(raw); len(parsed) > 0 {
+			return parsed
+		}
+	}
+	return nil
+}
+
+func listenParamCandidates(text string) []string {
+	var out []string
+	for _, re := range []*regexp.Regexp{
+		regexp.MustCompile(`(?is)listenParam\s*=\s*'([\s\S]*?)'\s*;`),
+		regexp.MustCompile(`(?is)listenParam\s*=\s*"([\s\S]*?)"\s*;`),
+	} {
+		for _, m := range re.FindAllStringSubmatch(text, -1) {
+			out = append(out, m[1])
+		}
+	}
+	if idx := strings.Index(text, "listenParam"); idx >= 0 {
+		if start := strings.Index(text[idx:], "{"); start >= 0 {
+			if obj := balancedJSON(text[idx+start:]); obj != "" {
+				out = append(out, obj)
+			}
+		}
+	}
+	return out
+}
+
+func parseLooseJSONObject(raw string) map[string]any {
+	raw = strings.TrimSpace(html.UnescapeString(raw))
+	raw = strings.ReplaceAll(raw, `\/`, "/")
+	raw = strings.ReplaceAll(raw, `\u002F`, "/")
+	raw = strings.ReplaceAll(raw, `\u002f`, "/")
+	raw = strings.ReplaceAll(raw, `\u003A`, ":")
+	raw = strings.ReplaceAll(raw, `\u003a`, ":")
+	raw = strings.ReplaceAll(raw, `\u0026`, "&")
+	if unq, err := strconv.Unquote(raw); err == nil {
+		raw = unq
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(raw), &m) == nil {
+		return m
+	}
+	normalized := regexp.MustCompile(`(?m)([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:`).ReplaceAllString(raw, `${1}"${2}":`)
+	normalized = regexp.MustCompile(`'([^'\\]*(?:\\.[^'\\]*)*)'`).ReplaceAllString(normalized, `"$1"`)
+	if json.Unmarshal([]byte(normalized), &m) == nil {
+		return m
+	}
+	return nil
+}
+
+func pickDongaoVideoSource(listen map[string]any, quality string) (string, string) {
+	for _, key := range dongaoQualityOrder(quality) {
+		if u := dongaoSourceValue(listen[key]); u != "" {
+			return u, key
+		}
+	}
+	for _, key := range []string{"source", "url", "path", "playUrl", "mainSource", "videoSource", "hdMainSource", "sdMainSource", "cifMainSource"} {
+		if u := dongaoSourceValue(listen[key]); u != "" {
+			return u, key
+		}
+	}
+	return "", ""
+}
+
+func dongaoQualityOrder(quality string) []string {
+	switch strings.ToLower(strings.TrimSpace(quality)) {
+	case "sd", "ld", "cif":
+		return []string{"cifMainSource", "sdMainSource", "hdMainSource"}
+	case "hd":
+		return []string{"sdMainSource", "hdMainSource", "cifMainSource"}
+	default:
+		return []string{"hdMainSource", "sdMainSource", "cifMainSource"}
+	}
+}
+
+func dongaoSourceValue(v any) string {
+	switch x := v.(type) {
+	case string:
+		raw := normalizeURL(x)
+		if isMediaURL(raw) {
+			return raw
+		}
+		if dec := dongaoDecryptSource(x); isMediaURL(dec) {
+			return dec
+		}
+	case map[string]any:
+		if u := findMediaURL(x); u != "" {
+			return u
+		}
+	case []any:
+		for _, item := range x {
+			if u := dongaoSourceValue(item); u != "" {
+				return u
+			}
+		}
+	}
+	return ""
+}
+
+func dongaoDecryptSource(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" || strings.HasPrefix(strings.ToLower(s), "http") {
+		return ""
+	}
+	s = strings.ReplaceAll(s, " ", "+")
+	s += strings.Repeat("=", (4-len(s)%4)%4)
+	ct, err := base64.StdEncoding.DecodeString(s)
+	if err != nil || len(ct) == 0 {
+		return ""
+	}
+	pt, err := util.AESDecryptCBC(ct, []byte(dongaoAESKey), []byte(dongaoAESIV))
+	if err != nil {
+		return ""
+	}
+	return normalizeURL(string(pt))
+}
+
+type dongaoCourseRef struct {
+	Title       string
+	URL         string
+	ExamID      string
+	ExamName    string
+	SubjectID   string
+	SubjectName string
+	SeasonID    string
+	SeasonName  string
+	Year        string
+	Price       float64
+	Purchased   bool
+	Raw         map[string]any
+}
+
+func fetchDongaoCourseList(c *util.Client, headers map[string]string) ([]dongaoCourseRef, error) {
+	payloads, err := fetchDongaoMemberPayloads(c, headers)
+	if err != nil {
+		return nil, err
+	}
+	var courses []dongaoCourseRef
+	for _, payload := range payloads {
+		courses = append(courses, buildDongaoCourses(payload)...)
+	}
+	courses = dedupeDongaoCourses(courses)
+	sort.SliceStable(courses, func(i, j int) bool {
+		if courses[i].Year != courses[j].Year {
+			return courses[i].Year > courses[j].Year
+		}
+		return courses[i].Title < courses[j].Title
+	})
+	return courses, nil
+}
+
+func fetchDongaoMemberPayloads(c *util.Client, headers map[string]string) ([]any, error) {
+	var out []any
+	var lastErr error
+	for _, endpoint := range []string{login_check_url, member_service_url} {
+		for _, method := range []string{"GET", "POST"} {
+			var body string
+			var err error
+			if method == "POST" {
+				body, err = c.PostForm(endpoint, map[string]string{}, headers)
+			} else {
+				body, err = c.GetString(endpoint, headers)
+			}
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if isDongaoGuestPayload(body) {
+				continue
+			}
+			payload := parseJSONText(body)
+			if payload == nil {
+				continue
+			}
+			out = append(out, payload)
+		}
+	}
+	if len(out) == 0 && lastErr != nil {
+		return nil, lastErr
+	}
+	return out, nil
+}
+
+func buildDongaoCourses(root any) []dongaoCourseRef {
+	var out []dongaoCourseRef
+	seen := map[string]bool{}
+	var walk func(any, dongaoCourseRef)
+	walk = func(v any, ctx dongaoCourseRef) {
+		switch x := v.(type) {
+		case map[string]any:
+			next := ctx
+			next.Raw = x
+			if id := valueString(x, "examId", "ed"); id != "" {
+				next.ExamID = id
+			}
+			if name := valueString(x, "examName", "en"); name != "" {
+				next.ExamName = name
+			}
+			if id := valueString(x, "subjectId", "sd", "sid"); id != "" {
+				next.SubjectID = id
+			}
+			if name := valueString(x, "subjectName", "sn"); name != "" {
+				next.SubjectName = name
+			}
+			if id := valueString(x, "sSubjectId", "ssd", "ssid", "seasonId"); id != "" {
+				next.SeasonID = id
+			}
+			if name := valueString(x, "sSubjectName", "ssn", "seasonName"); name != "" {
+				next.SeasonName = name
+			}
+			if year := firstNonEmpty(valueString(x, "sSubjectYear", "yr"), yearFromText(next.SeasonName)); year != "" {
+				next.Year = year
+			}
+			if price := normalizeDongaoPrice(valueString(x, "price", "st", "amount")); price > 0 {
+				next.Price = price
+			}
+			if next.SubjectID != "" && next.SeasonID != "" {
+				key := next.SubjectID + "|" + next.SeasonID
+				if !seen[key] {
+					seen[key] = true
+					next.Purchased = true
+					next.Title = firstNonEmpty(valueString(x, "title", "name"), dongaoCourseTitle(next))
+					next.URL = fmt.Sprintf("https://course.dongao.com/progress?sid=%s&ssid=%s", url.QueryEscape(next.SubjectID), url.QueryEscape(next.SeasonID))
+					out = append(out, next)
+				}
+			}
+			for _, child := range x {
+				walk(child, next)
+			}
+		case []any:
+			for _, child := range x {
+				walk(child, ctx)
+			}
+		}
+	}
+	walk(root, dongaoCourseRef{})
+	return out
+}
+
+func normalizeDongaoPrice(raw string) float64 {
+	n, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	if n >= 1000 {
+		return n / 10
+	}
+	return n * 100
+}
+
+func yearFromText(text string) string {
+	if m := regexp.MustCompile(`20\d{2}`).FindString(text); m != "" {
+		return m
+	}
+	return ""
+}
+
+func dongaoCourseTitle(c dongaoCourseRef) string {
+	subject := firstNonEmpty(c.SubjectName, c.SubjectID)
+	season := firstNonEmpty(c.SeasonName, c.SeasonID)
+	if season != "" {
+		return fmt.Sprintf("东奥课程-%s[%s]", subject, season)
+	}
+	return "东奥课程-" + subject
+}
+
+func dedupeDongaoCourses(in []dongaoCourseRef) []dongaoCourseRef {
+	seen := map[string]int{}
+	var out []dongaoCourseRef
+	for _, c := range in {
+		if c.SubjectID == "" || c.SeasonID == "" {
+			continue
+		}
+		key := c.SubjectID + "|" + c.SeasonID
+		if idx, ok := seen[key]; ok {
+			if out[idx].Title == "" {
+				out[idx].Title = c.Title
+			}
+			if out[idx].Price == 0 {
+				out[idx].Price = c.Price
+			}
+			continue
+		}
+		seen[key] = len(out)
+		out = append(out, c)
+	}
+	return out
+}
+
+func dongaoCourseListMedia(courses []dongaoCourseRef) *extractor.MediaInfo {
+	entries := make([]*extractor.MediaInfo, 0, len(courses))
+	for _, course := range courses {
+		entries = append(entries, &extractor.MediaInfo{
+			Site:  "dongao",
+			Title: util.SanitizeFilename(firstNonEmpty(course.Title, course.SubjectID+"_"+course.SeasonID)),
+			Extra: map[string]any{
+				"url":          course.URL,
+				"course_id":    course.SubjectID + "_" + course.SeasonID,
+				"subject_id":   course.SubjectID,
+				"subject_name": course.SubjectName,
+				"season_id":    course.SeasonID,
+				"season_name":  course.SeasonName,
+				"exam_id":      course.ExamID,
+				"exam_name":    course.ExamName,
+				"year":         course.Year,
+				"price":        course.Price,
+				"purchased":    course.Purchased,
+				"course":       course.Raw,
+			},
+		})
+	}
+	return &extractor.MediaInfo{Site: "dongao", Title: "dongao_courses", Entries: entries}
+}
+
+func dongaoCookieHeader(jar interface{ Cookies(*url.URL) []*http.Cookie }) string {
+	if jar == nil {
+		return ""
+	}
+	hosts := []string{"course.dongao.com", "my.dongao.com", "serveapi.dongao.com", "www.dongao.com", "dongao.com"}
+	seen := map[string]bool{}
+	var parts []string
+	for _, host := range hosts {
+		for _, ck := range jar.Cookies(&url.URL{Scheme: "https", Host: host, Path: "/"}) {
+			if ck.Name == "" || seen[ck.Name] {
+				continue
+			}
+			seen[ck.Name] = true
+			parts = append(parts, ck.Name+"="+ck.Value)
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+func hasDongaoLoginCookie(jar interface{ Cookies(*url.URL) []*http.Cookie }) bool {
+	cookies := cookieMapFromHeader(dongaoCookieHeader(jar))
+	return cookies["dongaoLogin"] != "" && cookies["memberinfo"] != ""
+}
+
+func validateDongaoLogin(c *util.Client, jar interface{ Cookies(*url.URL) []*http.Cookie }, headers map[string]string) error {
+	if !hasDongaoLoginCookie(jar) {
+		return fmt.Errorf("dongao requires valid login cookies (dongaoLogin and memberinfo)")
+	}
+	payloads, err := fetchDongaoMemberPayloads(c, headers)
+	if err != nil {
+		return fmt.Errorf("dongao login check: %w", err)
+	}
+	if len(payloads) == 0 {
+		return fmt.Errorf("dongao login check failed: member course APIs returned no logged-in payload")
+	}
+	apiHeaders := cloneHeaders(headers)
+	apiHeaders["Referer"] = device_verify_referer
+	apiHeaders["Origin"] = device_verify_origin
+	for _, payload := range payloads {
+		courses := buildDongaoCourses(payload)
+		if len(courses) == 0 {
+			continue
+		}
+		form := map[string]string{"lecturerId": "", "sid": courses[0].SubjectID, "ssid": courses[0].SeasonID}
+		if body, err := c.PostForm(stage_probe_url, form, apiHeaders); err == nil && !isDongaoGuestPayload(body) {
+			if parsed := parseJSONText(body); parsed != nil {
+				return nil
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
+func isDongaoGuestPayload(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return true
+	}
+	if strings.HasPrefix(lower, "<") && (strings.Contains(lower, "login") || strings.Contains(lower, "passport") || strings.Contains(lower, "登录")) {
+		return true
+	}
+	return strings.Contains(lower, "loginbgimgpath") || strings.Contains(lower, "loginpageimagelink") || strings.Contains(lower, "deviceverify")
+}
+
+func cookieMapFromHeader(header string) map[string]string {
+	out := map[string]string{}
+	for _, part := range strings.Split(header, ";") {
+		pieces := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(pieces) == 2 {
+			out[pieces[0]] = pieces[1]
+		}
+	}
+	return out
 }

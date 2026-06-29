@@ -44,6 +44,9 @@ const (
 	lessonDetailPath      = "/homepage/lessonDetailV0812/queryLessonDetail"
 	courseMaterialsPath   = "/homepage/lessonDetail/queryCourseMaterialListV0303"
 	handoutPDFPath        = "/homepage/lessonDetail/share/handout"
+	homepageListPath      = "/home-pages/stu/curriculum/index/curriculumListDetails"
+	homepageOnePath       = "/home-pages/stu/curriculum/index/curriculumOneDetails"
+	homepageHomeworksPath = "/home-pages/stu/aggregation/getHomeworks"
 	videoInfoPath         = "/playback/v4/video/init?from=YUNXUEXI"
 	legacyRecordPath      = "/classroom-ai/record/v1/resources"
 	recordResourcesPath   = "/classroom-ai/record/v3/resources"
@@ -103,8 +106,17 @@ func (s *Ledu) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.M
 	title := firstText(classInfo["clientCourseName"], classInfo["clientClassName"], classInfo["className"], classInfo["courseName"], classInfo["name"], "ledu_"+cid)
 	courseID := firstText(classInfo["pcStdCourseId"], classInfo["stdCourseId"], classInfo["stdCourseIdForDetail"], classInfo["courseId"], cid)
 	grade := firstText(classInfo["gradeId"], classInfo["stdGrade"])
+	price := leduResolveCoursePrice(classInfo, title)
+	purchased := leduPurchased(classInfo)
 
 	details := fetchCourseDetails(c, headers, studentID, courseID)
+	if clientPayload := fetchClientCoursePayload(c, headers, classInfo); clientPayload != nil {
+		if clientTitle := leduExtractClientCourseName(clientPayload); clientTitle != "" {
+			title = clientTitle
+			classInfo["clientCourseName"] = clientTitle
+		}
+		details = mergeLeduDetails(details, detailItemsFromClientPayload(c, headers, classInfo, clientPayload))
+	}
 	if len(details) == 0 {
 		details = detailItemsFromClassInfo(classInfo)
 		if len(details) == 0 {
@@ -115,7 +127,7 @@ func (s *Ledu) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.M
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("ledu: no playable video/material entries for classId=%s", cid)
 	}
-	return &extractor.MediaInfo{Site: "ledu", Title: title, Entries: entries, Extra: map[string]any{"classId": cid, "stdCourseId": courseID, "stuId": studentID}}, nil
+	return &extractor.MediaInfo{Site: "ledu", Title: title, Entries: entries, Extra: map[string]any{"classId": cid, "stdCourseId": courseID, "stuId": studentID, "price": price, "purchased": purchased}}, nil
 }
 
 func leduHeaders(cookie, stuID, classID, courseID, grade, liveID, tutorID string) map[string]string {
@@ -305,6 +317,245 @@ func detailItemsFromClassInfo(classInfo map[string]any) []map[string]any {
 	return out
 }
 
+func fetchClientCoursePayload(c *util.Client, headers map[string]string, classInfo map[string]any) any {
+	if classInfo == nil {
+		return nil
+	}
+	classID := firstText(classInfo["classId"], classInfo["id"], classInfo["class_id"], classInfo["stdClassId"])
+	studentID := firstText(headers["stuId"], headers["studentId"])
+	if classID == "" || studentID == "" {
+		return nil
+	}
+	courseID := firstText(classInfo["stdCourseId"], classInfo["stdCourseIdForDetail"], classInfo["pcStdCourseId"], classInfo["courseId"], classID)
+	body := map[string]any{
+		"stdCourseId": courseID,
+		"classId":     classID,
+		"stuIdStr":    studentID,
+		"stuId":       leduMaybeInt(studentID),
+	}
+	payload, err := leduPostJSON(c, apiHost, homepageListPath, body, headers)
+	if err != nil {
+		return nil
+	}
+	data := extractPayload(payload)
+	if !hasUsefulMap(data) && len(leduClientCurriculumItems(data)) == 0 {
+		if m, ok := data.(map[string]any); ok && len(m) == 0 {
+			return nil
+		}
+	}
+	return data
+}
+
+func detailItemsFromClientPayload(c *util.Client, headers map[string]string, classInfo map[string]any, payload any) []map[string]any {
+	items := leduClientCurriculumItems(payload)
+	if len(items) == 0 {
+		return nil
+	}
+	registIDs := uniqueLeduTexts(valuesFromAny(firstNonNil(classInfo["registIdList"], classInfo["registIds"], classInfo["registerIds"], classInfo["registId"])))
+	out := make([]map[string]any, 0, len(items))
+	for i, item := range items {
+		detail := cloneAnyMap(classInfo)
+		delete(detail, "curriculumList")
+		delete(detail, "curriculumInfos")
+		delete(detail, "curriculums")
+		delete(detail, "curriculumDTOList")
+		for k, v := range item {
+			detail[k] = v
+		}
+		if detail["classId"] == nil {
+			detail["classId"] = firstText(item["classId"], classInfo["classId"], classInfo["id"], classInfo["class_id"], classInfo["stdClassId"])
+		}
+		if detail["curriculumId"] == nil {
+			detail["curriculumId"] = firstText(item["curriculum_id"], item["coursewareCurriculumId"], item["courseId"], item["id"])
+		}
+		if detail["curriculumNo"] == nil {
+			detail["curriculumNo"] = firstText(item["curriculum_no"], item["curriculumNum"], item["number"], strconv.Itoa(i+1))
+		}
+		if detail["registId"] == nil {
+			detail["registId"] = firstText(item["regist_id"], item["registerId"], pickIndex(registIDs, i))
+		}
+		if detail["liveName"] == nil {
+			detail["liveName"] = firstText(item["mainPrompt"], item["title"], item["curriculumName"], item["curriculumDisplayName"], item["cName"], item["name"], fmt.Sprintf("lesson_%d", i+1))
+		}
+		detail["clientListItem"] = item
+		if one := fetchClientCurriculumOneDetails(c, headers, classInfo, detail); one != nil {
+			detail["clientOneDetail"] = one
+			if oneMap, ok := extractPayload(one).(map[string]any); ok {
+				for k, v := range oneMap {
+					if detail[k] == nil {
+						detail[k] = v
+					}
+				}
+			}
+		}
+		if homework := fetchClientHomeworks(c, headers, classInfo, detail); homework != nil {
+			detail["clientHomeworks"] = homework
+		}
+		out = append(out, detail)
+	}
+	return out
+}
+
+func fetchClientCurriculumOneDetails(c *util.Client, headers map[string]string, classInfo, curriculum map[string]any) any {
+	body := leduClientCurriculumBody(headers, classInfo, curriculum)
+	if body == nil {
+		return nil
+	}
+	payload, err := leduPostJSON(c, apiHost, homepageOnePath, body, headers)
+	if err != nil {
+		return nil
+	}
+	return extractPayload(payload)
+}
+
+func fetchClientHomeworks(c *util.Client, headers map[string]string, classInfo, curriculum map[string]any) any {
+	body := leduClientCurriculumBody(headers, classInfo, curriculum)
+	if body == nil {
+		return nil
+	}
+	body["chapterId"] = firstText(curriculum["chapterId"], curriculum["chapter_id"], body["studySelfRoomChapterId"])
+	body["type"] = firstNonNil(curriculum["type"], 1)
+	payload, err := leduPostJSON(c, apiHost, homepageHomeworksPath, body, headers)
+	if err != nil {
+		return nil
+	}
+	return extractPayload(payload)
+}
+
+func leduClientCurriculumBody(headers map[string]string, classInfo, curriculum map[string]any) map[string]any {
+	if classInfo == nil {
+		classInfo = map[string]any{}
+	}
+	if curriculum == nil {
+		curriculum = map[string]any{}
+	}
+	studentID := firstText(headers["stuId"], headers["studentId"])
+	classID := firstText(curriculum["classId"], curriculum["class_id"], classInfo["classId"], classInfo["id"], classInfo["class_id"], classInfo["stdClassId"], headers["stdClassId"])
+	curriculumID := firstText(curriculum["curriculumId"], curriculum["curriculum_id"], curriculum["coursewareCurriculumId"], curriculum["courseId"], curriculum["id"])
+	curriculumNo := firstText(curriculum["curriculumNo"], curriculum["curriculum_no"], curriculum["curriculumNum"], curriculum["number"])
+	registID := firstText(curriculum["registId"], curriculum["regist_id"], curriculum["registerId"], classInfo["registId"])
+	if studentID == "" || classID == "" || curriculumID == "" {
+		return nil
+	}
+	studySelfRoomInfo := anyMap(curriculum["studySelfRoomInfo"])
+	recommend := anyMap(curriculum["recommendJumpsSceneVO"])
+	courseID := firstText(curriculum["stdCourseId"], curriculum["newCourseId"], recommend["courseId"], classInfo["stdCourseId"], classInfo["stdCourseIdForDetail"], classInfo["pcStdCourseId"], classInfo["courseId"], headers["stdCourseId"])
+	return map[string]any{
+		"stuIdStr":               studentID,
+		"stuId":                  leduMaybeInt(studentID),
+		"studySelfRoomChapterId": firstText(curriculum["studySelfRoomChapterId"], studySelfRoomInfo["chapterId"]),
+		"stdCourseId":            courseID,
+		"curriculumNo":           leduMaybeInt(curriculumNo),
+		"curriculumId":           curriculumID,
+		"classId":                classID,
+		"registId":               registID,
+	}
+}
+
+func leduClientCurriculumItems(payload any) []map[string]any {
+	for _, node := range nestedMaps(payload) {
+		for _, key := range []string{"stuCurriculumNumberListVos", "stuCurriculumNumberListVOs", "curriculumList", "curriculumInfos"} {
+			if items := recordsFromImmediate(node[key]); len(items) > 0 {
+				return items
+			}
+		}
+	}
+	return nil
+}
+
+func leduExtractClientCourseName(payload any) string {
+	preferred := firstTextFromMaps(payload, "clientCourseName")
+	if preferred != "" {
+		return preferred
+	}
+	for _, node := range nestedMaps(payload) {
+		if node["stuCurriculumCourseVo"] != nil {
+			if m := anyMap(node["stuCurriculumCourseVo"]); m != nil {
+				if name := firstText(m["courseName"], m["className"], m["name"], m["title"]); name != "" {
+					return name
+				}
+			}
+		}
+	}
+	for _, node := range nestedMaps(payload) {
+		if name := firstText(node["courseName"], node["className"], node["name"], node["title"]); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func mergeLeduDetails(base, extra []map[string]any) []map[string]any {
+	if len(extra) == 0 {
+		return base
+	}
+	out := append([]map[string]any{}, base...)
+	index := map[string]int{}
+	for i, item := range out {
+		if key := leduDetailKey(item); key != "" {
+			index[key] = i
+		}
+	}
+	for _, item := range extra {
+		key := leduDetailKey(item)
+		if key != "" {
+			if i, ok := index[key]; ok {
+				for k, v := range item {
+					if out[i][k] == nil {
+						out[i][k] = v
+					}
+				}
+				continue
+			}
+			index[key] = len(out)
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func leduDetailKey(m map[string]any) string {
+	parts := []string{
+		firstText(m["liveId"], m["live_id"], m["chapterId"], m["chapter_id"]),
+		firstText(m["curriculumId"], m["curriculum_id"]),
+		firstText(m["curriculumNo"], m["curriculum_no"]),
+		firstText(m["registId"], m["regist_id"]),
+	}
+	key := strings.Join(parts, "|")
+	if key == "|||" {
+		return ""
+	}
+	return key
+}
+
+func recordsFromImmediate(v any) []map[string]any {
+	switch x := v.(type) {
+	case []any:
+		out := make([]map[string]any, 0, len(x))
+		for _, it := range x {
+			if m, ok := it.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	case []map[string]any:
+		return x
+	default:
+		return nil
+	}
+}
+
+func leduMaybeInt(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if n, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return n
+	}
+	return value
+}
+
 func buildEntries(c *util.Client, details []map[string]any, headers map[string]string) []*extractor.MediaInfo {
 	var entries []*extractor.MediaInfo
 	seen := map[string]bool{}
@@ -475,33 +726,34 @@ func buildEntries(c *util.Client, details []map[string]any, headers map[string]s
 
 		// Collect video entries from all roots
 		for _, node := range nestedMaps(roots) {
-			murl := mediaURL(node)
-			if murl == "" || seen[murl] {
-				continue
-			}
-			seen[murl] = true
-			name := firstText(node["video_name"], node["videoTitle"], node["video_title"], node["liveName"], node["taskName"], node["itemName"], node["title"], node["name"], fmt.Sprintf("item_%03d", len(entries)+1))
-			format := mediaFormat(murl, node)
-			stream := extractor.Stream{Quality: "best", URLs: []string{murl}, Format: format, Headers: leduMediaHeaders(playbackHeaders)}
-			if format == "m3u8" {
-				stream.NeedMerge = true
-			}
-			extra := map[string]any{"source": firstText(node["liveId"], node["taskId"], node["paperId"], node["noteId"])}
-			// Propagate encryption info if present
-			if encKey := firstText(node["encKey"]); encKey != "" {
-				extra["encKey"] = encKey
-			}
-			if encIv := firstText(node["encIv"]); encIv != "" {
-				extra["encIv"] = encIv
-			}
-			if format == "m3u8" {
-				if dataURL, text, ok := prepareLeduM3U8(c, murl, node, playbackHeaders); ok {
-					stream.URLs = []string{dataURL}
-					extra["m3u8_text"] = text
-					extra["source_type"] = "m3u8_text"
+			for _, murl := range mediaURLs(node) {
+				if murl == "" || seen[murl] {
+					continue
 				}
+				seen[murl] = true
+				name := firstText(node["video_name"], node["videoTitle"], node["video_title"], node["liveName"], node["taskName"], node["itemName"], node["title"], node["name"], fmt.Sprintf("item_%03d", len(entries)+1))
+				format := mediaFormat(murl, node)
+				stream := extractor.Stream{Quality: "best", URLs: []string{murl}, Format: format, Headers: leduMediaHeaders(playbackHeaders)}
+				if format == "m3u8" {
+					stream.NeedMerge = true
+				}
+				extra := map[string]any{"source": firstText(node["liveId"], node["taskId"], node["paperId"], node["noteId"])}
+				// Propagate encryption info if present
+				if encKey := firstText(node["encKey"]); encKey != "" {
+					extra["encKey"] = encKey
+				}
+				if encIv := firstText(node["encIv"]); encIv != "" {
+					extra["encIv"] = encIv
+				}
+				if format == "m3u8" {
+					if dataURL, text, ok := prepareLeduM3U8(c, murl, node, playbackHeaders); ok {
+						stream.URLs = []string{dataURL}
+						extra["m3u8_text"] = text
+						extra["source_type"] = "m3u8_text"
+					}
+				}
+				entries = append(entries, &extractor.MediaInfo{Site: "ledu", Title: fmt.Sprintf("[%d.%d]--%s", i+1, len(entries)+1, name), Streams: map[string]extractor.Stream{"best": stream}, Extra: extra})
 			}
-			entries = append(entries, &extractor.MediaInfo{Site: "ledu", Title: fmt.Sprintf("[%d.%d]--%s", i+1, len(entries)+1, name), Streams: map[string]extractor.Stream{"best": stream}, Extra: extra})
 		}
 	}
 	return entries
@@ -879,7 +1131,7 @@ func fetchPreviewMedia(c *util.Client, headers map[string]string, task map[strin
 
 func hasMediaCandidates(v any) bool {
 	for _, node := range nestedMaps(v) {
-		if mediaURL(node) != "" {
+		if len(mediaURLs(node)) > 0 {
 			return true
 		}
 	}
@@ -927,21 +1179,65 @@ func orderForType(t string) string {
 }
 
 func mediaURL(m map[string]any) string {
+	if urls := mediaURLs(m); len(urls) > 0 {
+		return urls[0]
+	}
+	return ""
+}
+
+func mediaURLs(m map[string]any) []string {
+	if m == nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	add := func(u string) {
+		u = normalizeLeduURL(u)
+		if u == "" || seen[u] {
+			return
+		}
+		seen[u] = true
+		out = append(out, u)
+	}
 	keys := []string{"m3u8Url", "videoM3u8Url", "m3u8", "m3u8_url", "mp4", "mp4Url", "trVideoUrl", "videoUrl", "videoUrlList", "encUrl", "encUrls", "fileUrl", "itemUrl", "downloadUrl", "resourceUrl", "attachmentUrl", "pdfUrl", "src", "url"}
 	for _, k := range keys {
-		if s := firstMediaURL(m[k], k, m); s != "" {
-			return s
-		}
+		collectMediaURLs(m[k], k, m, add)
 	}
 	for k, v := range m {
 		lk := strings.ToLower(k)
 		if strings.HasPrefix(lk, "line") || strings.Contains(lk, "definition") || strings.Contains(lk, "quality") {
-			if s := firstMediaURL(v, k, m); s != "" {
-				return s
+			collectMediaURLs(v, k, m, add)
+		}
+	}
+	return out
+}
+
+func collectMediaURLs(v any, key string, ctx map[string]any, add func(string)) {
+	switch x := v.(type) {
+	case string:
+		u := normalizeLeduURL(x)
+		if u != "" && (looksMedia(u) || isMaterial(ctx) || mediaKeyAllowsURL(key)) {
+			add(u)
+		}
+	case []any:
+		for _, it := range x {
+			collectMediaURLs(it, key, ctx, add)
+		}
+	case []string:
+		for _, it := range x {
+			collectMediaURLs(it, key, ctx, add)
+		}
+	case map[string]any:
+		for _, k := range []string{"m3u8Url", "videoM3u8Url", "m3u8", "m3u8_url", "mp4", "mp4Url", "trVideoUrl", "videoUrl", "videoUrlList", "encUrl", "encUrls", "url", "fileUrl", "itemUrl", "downloadUrl", "resourceUrl", "attachmentUrl", "pdfUrl", "src"} {
+			collectMediaURLs(x[k], k, x, add)
+		}
+		for k, it := range x {
+			lk := strings.ToLower(k)
+			if strings.HasPrefix(lk, "line") || strings.Contains(lk, "definition") || strings.Contains(lk, "quality") {
+				collectMediaURLs(it, k, x, add)
 			}
 		}
 	}
-	return ""
 }
 
 func firstMediaURL(v any, key string, ctx map[string]any) string {

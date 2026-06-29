@@ -2,6 +2,8 @@
 package med66
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -59,6 +61,7 @@ func (m *Med66) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.
 	c.SetCookieJar(opts.Cookies)
 	headers := med66Headers()
 	uid := cookieValue(opts.Cookies, []string{"https://member.med66.com/", "https://www.med66.com/"}, "cdeluid")
+	headers = med66HeadersFromJar(opts.Cookies, headers)
 
 	if isReplayURL(rawURL) {
 		entry, err := resolveReplayEntry(c, rawURL, rawURL, uid, "med66_replay")
@@ -84,6 +87,7 @@ func (m *Med66) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.
 	if err != nil {
 		return nil, err
 	}
+	price := resolveCoursePrice(c, headers, course)
 	wares, err := fetchCoursewares(c, headers, course)
 	if err != nil {
 		return nil, err
@@ -164,7 +168,11 @@ func (m *Med66) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.
 		return nil, fmt.Errorf("med66: no playable entries found (course locked or schema changed)")
 	}
 
-	return &extractor.MediaInfo{Site: "med66", Title: course.Title, Entries: entries}, nil
+	extra := map[string]any{"course_id": course.CourseID, "purchased": true}
+	if price > 0 {
+		extra["price"] = price
+	}
+	return &extractor.MediaInfo{Site: "med66", Title: course.Title, Entries: entries, Extra: extra}, nil
 }
 
 type med66Course struct {
@@ -670,7 +678,7 @@ func resolveReplayEntry(c *util.Client, playURL, referer, uid, title string) (*e
 	}
 
 	streams := map[string]extractor.Stream{}
-	for idx, s := range playInfo.VideoList {
+	for idx, s := range rankCssLcloudStreams(playInfo.VideoList) {
 		if s.URL == "" {
 			continue
 		}
@@ -678,10 +686,12 @@ func resolveReplayEntry(c *util.Client, playURL, referer, uid, title string) (*e
 		if s.Definition == 0 {
 			key = fmt.Sprintf("stream_%d", idx+1)
 		}
-		streams[key] = extractor.Stream{Quality: key, URLs: []string{s.URL}, Format: pickFormat(s.URL), AudioURL: playInfo.AudioURL, Headers: map[string]string{"Referer": LIVE_REFERER_URL}}
+		format := pickFormat(s.URL)
+		streams[key] = extractor.Stream{Quality: key, URLs: []string{s.URL}, Format: format, NeedMerge: format == "m3u8", AudioURL: playInfo.AudioURL, Headers: map[string]string{"Referer": LIVE_REFERER_URL}}
 	}
 	if len(streams) == 0 && playInfo.VideoURL != "" {
-		streams["best"] = extractor.Stream{Quality: "best", URLs: []string{playInfo.VideoURL}, Format: pickFormat(playInfo.VideoURL), AudioURL: playInfo.AudioURL, Headers: map[string]string{"Referer": LIVE_REFERER_URL}}
+		format := pickFormat(playInfo.VideoURL)
+		streams["best"] = extractor.Stream{Quality: "best", URLs: []string{playInfo.VideoURL}, Format: format, NeedMerge: format == "m3u8", AudioURL: playInfo.AudioURL, Headers: map[string]string{"Referer": LIVE_REFERER_URL}}
 	}
 	if len(streams) == 0 {
 		return nil, fmt.Errorf("med66 csslcloud: no media URL")
@@ -690,12 +700,189 @@ func resolveReplayEntry(c *util.Client, playURL, referer, uid, title string) (*e
 	extra := map[string]any{"recordId": replay.RecordID, "accessid": replay.AccessID, "liveRoomId": firstNonEmpty(replay.LiveRoomID, replay.LiveID), "userid": viewer, "cc_replay_version": MED66_CC_REPLAY_VERSION}
 	if strings.Contains(playInfo.VideoURL, ".m3u8") {
 		if text, err := c.GetString(playInfo.VideoURL, map[string]string{"Referer": LIVE_REFERER_URL}); err == nil {
-			if rewritten, err := shared.CssLcloudRewriteM3U8Keys(c, text, LIVE_REFERER_URL); err == nil {
+			if rewritten, err := rewriteBokeCCM3U8Keys(c, text, playInfo.VideoURL, LIVE_REFERER_URL); err == nil {
+				extra["m3u8_text"] = rewritten
+			} else if rewritten, err := shared.CssLcloudRewriteM3U8Keys(c, text, LIVE_REFERER_URL); err == nil {
 				extra["m3u8_text"] = rewritten
 			}
 		}
 	}
 	return &extractor.MediaInfo{Site: "med66", Title: title, Streams: streams, Extra: extra}, nil
+}
+
+func rankCssLcloudStreams(list []shared.CssLcloudStreamInfo) []shared.CssLcloudStreamInfo {
+	out := make([]shared.CssLcloudStreamInfo, 0, len(list))
+	for _, s := range list {
+		if strings.TrimSpace(s.URL) == "" {
+			continue
+		}
+		out = append(out, s)
+	}
+	for i := 1; i < len(out); i++ {
+		cur := out[i]
+		j := i - 1
+		for j >= 0 && out[j].Definition < cur.Definition {
+			out[j+1] = out[j]
+			j--
+		}
+		out[j+1] = cur
+	}
+	return out
+}
+
+func rewriteBokeCCM3U8Keys(c *util.Client, m3u8Text, playlistURL, referer string) (string, error) {
+	if !strings.Contains(m3u8Text, "#EXTM3U") {
+		return "", fmt.Errorf("bokecc: input is not an m3u8 manifest")
+	}
+	keyCache := map[string]string{}
+	var out []string
+	for _, rawLine := range strings.Split(strings.ReplaceAll(strings.ReplaceAll(m3u8Text, "\r\n", "\n"), "\r", "\n"), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "#EXT-X-KEY"):
+			uri := extractM3U8URIAttr(line)
+			if uri == "" {
+				out = append(out, line)
+				continue
+			}
+			keyURL := resolveM3U8URL(playlistURL, uri)
+			replacement, ok := keyCache[keyURL]
+			if !ok {
+				hexKey, err := resolveBokeCCKeyToken(c, keyURL, referer)
+				if err == nil && hexKey != "" {
+					replacement = "0x" + hexKey
+				} else {
+					replacement = keyURL
+				}
+				keyCache[keyURL] = replacement
+			}
+			out = append(out, strings.Replace(line, uri, replacement, 1))
+		case strings.HasPrefix(line, "#EXT-X-MAP"):
+			uri := extractM3U8URIAttr(line)
+			if uri != "" {
+				line = strings.Replace(line, uri, resolveM3U8URL(playlistURL, uri), 1)
+			}
+			out = append(out, line)
+		case strings.HasPrefix(line, "#"):
+			out = append(out, line)
+		default:
+			out = append(out, resolveM3U8URL(playlistURL, line))
+		}
+	}
+	if len(out) == 0 {
+		return "", fmt.Errorf("bokecc: empty m3u8 manifest")
+	}
+	return strings.Join(out, "\n"), nil
+}
+
+func resolveBokeCCKeyToken(c *util.Client, keyURL, referer string) (string, error) {
+	keyURL = strings.TrimSpace(keyURL)
+	if keyURL == "" {
+		return "", fmt.Errorf("bokecc: empty key URL")
+	}
+	info := bokeCCInfoToken(keyURL)
+	if info == "" {
+		return "", fmt.Errorf("bokecc: missing info token")
+	}
+	headers := map[string]string{}
+	if referer != "" {
+		headers["Referer"] = referer
+	}
+	keyBody, err := c.GetBytes(keyURL, headers)
+	if err != nil {
+		return "", err
+	}
+	key := decryptBokeCCKey(keyBody, info)
+	if len(key) == 0 {
+		return "", fmt.Errorf("bokecc: key decrypt failed")
+	}
+	return strings.ToUpper(hex.EncodeToString(key)), nil
+}
+
+func decryptBokeCCKey(encKey []byte, bokeccVID string) []byte {
+	if len(encKey) < 21 || strings.TrimSpace(bokeccVID) == "" {
+		return nil
+	}
+	tables := make([][]byte, 0, 3)
+	for _, raw := range []string{
+		"Uglq1TA2pTi/QKOegfPX+3zjOYKbL/+HNI5DRMTe6ctUe5QypsIjPe5MlQtC+sNOCC6hZijZJLJ2W6JJbYvRJXL49mSGaJgW1KRczF1ltpJscEhQ/e252l4VRlenjZ2EkNirAIy80wr35FgFuLNFBtAsHo/KPw8Cwa+9AwETims6kRFBT2fc6pfyz87wtOZzlqx0IuetNYXi+TfoHHXfbkfxGnEdKcWJb7diDqoYvhv8Vj5LxtJ5IJrbwP54zVr0H92oM4gHxzGxEhBZJ4DsX2BRf6kZtUoNLeV6n5PJnO+g4DtNrir1sMjruzyDU5lhFysEfrp31ibhaRRjVSEMfQ==",
+		"Y1UhDH1SCWrVMDalOL9Ao56B89f7fOM5gpsv/4c0jkNExN7py1R7lDKmwiM97kyVC0L6w04ILqFmKNkksnZboklti9Elcvj2ZIZomBbUpFzMXWW2kmxwSFD97bnaXhVGV6eNnYSQ2KsAjLzTCvfkWAW4s0UG0Cwej8o/DwLBr70DAROKazqREUFPZ9zql/LPzvC05nOWrHQi5601heL5N+gcdd9uR/EacR0pxYlvt2IOqhi+G/xWPkvG0nkgmtvA/njNWvQf3agziAfHMbESEFkngOxfYFF/qRm1Sg0t5Xqfk8mc76DgO02uKvWwyOu7PINTmWEXKwR+unfWJuFpFA==",
+		"c5asdCLnrTWF4vk36Bx1325H8RpxHSnFiW+3Yg6qGL4b/FY+S8bSeSCa28D+eM1a9B/dqDOIB8cxsRIQWSeA7F9gUX+pGbVKDS3lep+TyZzvoOA7Ta4q9bDI67s8g1OZYRcrBH66d9Ym4WkUY1UhDH1SCWrVMDalOL9Ao56B89f7fOM5gpsv/4c0jkNExN7py1R7lDKmwiM97kyVC0L6w04ILqFmKNkksnZboklti9Elcvj2ZIZomBbUpFzMXWW2kmxwSFD97bnaXhVGV6eNnYSQ2KsAjLzTCvfkWAW4s0UG0Cwej8o/DwLBr70DAROKazqREUFPZ9zql/LPzvC05g==",
+	} {
+		decoded, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil {
+			return nil
+		}
+		tables = append(tables, decoded)
+	}
+	tableIndex := int(encKey[0])
+	if tableIndex < 0 || tableIndex >= len(tables) {
+		return nil
+	}
+	vidBytes := []byte(bokeccVID)
+	if len(vidBytes) == 0 {
+		return nil
+	}
+	out := make([]byte, 20)
+	for i := 0; i < 20; i++ {
+		idx := int(encKey[i+1]) ^ int(vidBytes[i%len(vidBytes)])
+		if idx < 0 || idx >= len(tables[tableIndex]) {
+			return nil
+		}
+		out[i] = tables[tableIndex][idx]
+	}
+	return out[:16]
+}
+
+func extractM3U8URIAttr(line string) string {
+	for _, marker := range []string{`URI="`, `URI='`} {
+		idx := strings.Index(line, marker)
+		if idx < 0 {
+			continue
+		}
+		rest := line[idx+len(marker):]
+		end := strings.IndexAny(rest, `"'`)
+		if end < 0 {
+			return ""
+		}
+		return rest[:end]
+	}
+	return ""
+}
+
+func resolveM3U8URL(playlistURL, item string) string {
+	item = strings.TrimSpace(item)
+	if item == "" || strings.HasPrefix(item, "data:") || strings.HasPrefix(item, "0x") {
+		return item
+	}
+	u, err := url.Parse(item)
+	if err != nil {
+		return item
+	}
+	if u.IsAbs() {
+		return u.String()
+	}
+	base, err := url.Parse(playlistURL)
+	if err != nil {
+		return item
+	}
+	return base.ResolveReference(u).String()
+}
+
+func bokeCCInfoToken(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	for _, key := range []string{"info", "vid", "videoid", "videoId"} {
+		if v := strings.TrimSpace(u.Query().Get(key)); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 type liveReplayPayload struct {

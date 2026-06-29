@@ -2,6 +2,8 @@
 package zhaozhao
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/rsa"
@@ -15,6 +17,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,14 +50,16 @@ const (
 )
 
 var (
-	patterns     = []string{`(?:[\w-]+\.)?yikao88\.com/`}
-	idRe         = regexp.MustCompile(`(?:productId|product_id|pid|courseId|course_id|cid)=([0-9A-Za-z_\-]+)`)
-	polyvVidRe   = regexp.MustCompile(`^[0-9A-Za-z]+_[0-9A-Za-z]+$`)
-	mediaURLRe   = regexp.MustCompile(`https?://[^"'\s<>]+(?:\.m3u8|\.mp4|\.flv|\.pdf|\.pptx?|\.docx?|\.xlsx?|\.zip|\.rar|\.7z|\.txt|\.png|\.jpe?g)[^"'\s<>]*`)
-	titleCleanRe = regexp.MustCompile(`[\\/:*?"<>|\r\n\t]+`)
-	m3u8URIRe    = regexp.MustCompile(`URI="([^"]+)"`)
-	m3u8IVRe     = regexp.MustCompile(`IV\s*=\s*0x([0-9a-fA-F]+)`)
-	bitrateRe    = regexp.MustCompile(`_(\d+)\.m3u8(?:\?|$)`)
+	patterns      = []string{`(?:[\w-]+\.)?yikao88\.com/`}
+	idRe          = regexp.MustCompile(`(?:productId|product_id|pid|courseId|course_id|cid)=([0-9A-Za-z_\-]+)`)
+	polyvVidRe    = regexp.MustCompile(`^[0-9A-Za-z]+_[0-9A-Za-z]+$`)
+	mediaURLRe    = regexp.MustCompile(`https?://[^"'\s<>]+(?:\.m3u8|\.mp4|\.flv|\.pdf|\.pptx?|\.docx?|\.xlsx?|\.zip|\.rar|\.7z|\.txt|\.png|\.jpe?g)[^"'\s<>]*`)
+	titleCleanRe  = regexp.MustCompile(`[\\/:*?"<>|\r\n\t]+`)
+	m3u8URIRe     = regexp.MustCompile(`URI="([^"]+)"`)
+	m3u8IVRe      = regexp.MustCompile(`IV\s*=\s*0x([0-9a-fA-F]+)`)
+	bitrateRe     = regexp.MustCompile(`_(\d+)\.m3u8(?:\?|$)`)
+	priceNumberRe = regexp.MustCompile(`-?\d+(?:\.\d+)?`)
+	priceKeys     = []string{"sellPrice", "specialPrice", "productPrice", "finalPrice", "discountPrice", "activityPrice", "price"}
 	// polyvPDXIVBytes from Zhaozhao_Base.polyv_pdx_iv_bytes.
 	polyvPDXIVBytes = []byte{13, 22, 8, 12, 7, 6, 13, 1, 50, 11, 12, 8, 5, 16, 4, 1}
 	playTokenAPIs   = []string{
@@ -150,7 +155,7 @@ func (s *Zhaozhao) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("zhaozhao: discovered %d video nodes but no playable polyv manifest resolved", len(videos))
 	}
-	return &extractor.MediaInfo{Site: "zhaozhao", Title: cleanTitle(firstNonEmpty(title, cid, pid)), Entries: entries}, nil
+	return &extractor.MediaInfo{Site: "zhaozhao", Title: cleanTitle(firstNonEmpty(title, cid, pid)), Entries: entries, Extra: ctx.courseExtra(coursePayloads)}, nil
 }
 
 func newContext(jar http.CookieJar, pid, cid string) *zzContext {
@@ -314,9 +319,10 @@ func (x *zzContext) courseListEntries() ([]*extractor.MediaInfo, error) {
 		if courseID != "" {
 			extra["course_id"] = courseID
 		}
-		if price := firstString(row, "price", "salePrice", "payPrice"); price != "" {
+		if price, ok := priceFromAny(row); ok {
 			extra["price"] = price
 		}
+		extra["purchased"] = true
 		entries = append(entries, &extractor.MediaInfo{Site: "zhaozhao", Title: title, Extra: extra})
 	}
 	return entries, nil
@@ -408,6 +414,16 @@ func responseUsable(out map[string]any) bool {
 	return !strings.Contains(msg, "未登录") && out["data"] != nil
 }
 
+func (x *zzContext) courseExtra(payloads []any) map[string]any {
+	extra := map[string]any{"product_id": x.pid, "course_id": x.cid, "purchased": true}
+	if price, ok := priceFromAny(payloads); ok {
+		extra["price"] = price
+	} else if x.pid != "" {
+		extra["price"] = float64(999)
+	}
+	return compactAnyMap(extra)
+}
+
 func (x *zzContext) resolveVideo(v zzVideo, index int) (*extractor.MediaInfo, error) {
 	if v.DirectURL != "" {
 		u := normalizeAssetURL(v.DirectURL)
@@ -436,11 +452,14 @@ func (x *zzContext) resolveVideo(v zzVideo, index int) (*extractor.MediaInfo, er
 	}
 	manifest, err := shared.PolyvPickBestManifest(sec)
 	if err != nil {
-		return nil, err
+		if len(sec.Data.Paths) == 0 {
+			return nil, err
+		}
+		manifest = sec.Data.Paths[0]
 	}
 	manifest = normalizePolyvManifestURL(manifest)
 	if strings.Contains(strings.ToLower(manifestPath(manifest)), ".pdx") {
-		return nil, fmt.Errorf("zhaozhao polyv: blocked needs PDX DRM JS engine (%s)", polyvPDXLibPlayerURL)
+		return x.resolvePolyvPDX(v, vid, manifest, playToken, sec, index)
 	}
 	playToken = firstNonEmpty(playToken, sec.Data.Playsafe.Token)
 	name := cleanTitle(firstNonEmpty(v.Title, sec.Data.Title, fmt.Sprintf("[%02d]--%s", index, v.VideoID)))
@@ -459,6 +478,89 @@ func (x *zzContext) resolveVideo(v zzVideo, index int) (*extractor.MediaInfo, er
 		streamURL = dataM3U8URL(m3u8Text)
 	}
 	return &extractor.MediaInfo{Site: "zhaozhao", Title: name, Streams: map[string]extractor.Stream{"default": {Quality: "best", URLs: []string{streamURL}, Format: "m3u8", NeedMerge: true, Headers: x.downloadHeaders()}}, Extra: extra}, nil
+}
+
+func (x *zzContext) resolvePolyvPDX(v zzVideo, polyvVID, pdxURL, playToken string, sec *shared.PolyvSecure, index int) (*extractor.MediaInfo, error) {
+	playToken = firstNonEmpty(playToken, sec.Data.Playsafe.Token)
+	name := cleanTitle(firstNonEmpty(v.Title, sec.Data.Title, fmt.Sprintf("[%02d]--%s", index, v.VideoID)))
+	pdxInfo, err := x.buildPolyvPDXInfo(pdxURL, v.VideoID, playToken)
+	if err != nil {
+		return nil, err
+	}
+	streamURL := normalizeAssetURL(firstNonEmpty(pdxInfo["m3u8_url"], pdxURL))
+	format := "pdx"
+	extra := map[string]any{
+		"video_id":          v.VideoID,
+		"polyv_vid":         polyvVID,
+		"source_type":       "polyv_pdx",
+		"pdx_url":           pdxURL,
+		"play_safe_token":   playToken,
+		"secure_url":        fmt.Sprintf(shared.PolyvSecureURLTmpl, url.PathEscape(polyvVID)),
+		"pdx_lib_player_js": polyvPDXLibPlayerURL,
+	}
+	for k, val := range pdxInfo {
+		if val != "" {
+			extra[k] = val
+		}
+	}
+	if text := pdxInfo["m3u8_text"]; text != "" {
+		extra["m3u8_text"] = text
+		streamURL = dataM3U8URL(text)
+		format = "m3u8"
+	}
+	stream := extractor.Stream{Quality: "best", URLs: []string{streamURL}, Format: format, NeedMerge: true, Headers: x.downloadHeaders(), Extra: map[string]any{"cryptor": "polyv_pdx"}}
+	return &extractor.MediaInfo{Site: "zhaozhao", Title: name, Streams: map[string]extractor.Stream{"default": stream}, Extra: extra}, nil
+}
+
+func (x *zzContext) buildPolyvPDXInfo(pdxURL, videoID, playToken string) (map[string]string, error) {
+	if pdxURL == "" || playToken == "" {
+		return nil, fmt.Errorf("zhaozhao polyv pdx: missing pdx URL or play token")
+	}
+	pid := fmt.Sprintf("%dX%07d", time.Now().UnixMilli(), time.Now().Nanosecond()%10000000)
+	pdxReqURL := addURLQueryParams(pdxURL, map[string]string{"pid": pid, "device": "desktop", "token": playToken})
+	headers := x.polyvHeaders()
+	body, err := x.c.GetString(pdxReqURL, headers)
+	if err != nil {
+		return nil, fmt.Errorf("zhaozhao polyv pdx fetch: %w", err)
+	}
+	text, seed, err := decryptPolyvPDXText(body)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.Contains(text, "#EXTM3U") {
+		return nil, fmt.Errorf("zhaozhao polyv pdx: decrypted body is not m3u8")
+	}
+	text = absolutizeM3U8Text(text, pdxReqURL)
+	keyURL := buildPolyvPDXKeyURL(firstM3U8URI(text), pdxReqURL, playToken, pid)
+	keyHex := ""
+	if keyURL != "" {
+		if keyBytes, err := x.c.GetBytes(keyURL, headers); err == nil && len(keyBytes) > 0 {
+			keyHex = strings.ToUpper(hex.EncodeToString(keyBytes))
+		}
+	}
+	return map[string]string{
+		"type":            "pdx",
+		"video_id":        videoID,
+		"pdx_url":         pdxURL,
+		"m3u8_url":        pdxReqURL,
+		"m3u8_text":       text,
+		"pid":             pid,
+		"play_safe_token": playToken,
+		"seed_const":      seed,
+		"iv_hex":          firstM3U8IV(text),
+		"key_url":         keyURL,
+		"key_hex":         keyHex,
+		"pdx_version":     "2",
+	}, nil
+}
+
+func (x *zzContext) polyvHeaders() map[string]string {
+	return map[string]string{
+		"Accept":     "application/json, text/plain, */*",
+		"Origin":     originURL,
+		"Referer":    refererURL,
+		"User-Agent": x.headers["User-Agent"],
+	}
 }
 
 func (x *zzContext) getPlayToken(videoID string) string {
@@ -1024,4 +1126,176 @@ func inlineHexKeyURIs(text string) string {
 
 func dataM3U8URL(text string) string {
 	return "data:application/vnd.apple.mpegurl;base64," + base64.StdEncoding.EncodeToString([]byte(text))
+}
+
+func addURLQueryParams(raw string, params map[string]string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return raw
+	}
+	q := u.Query()
+	for k, v := range params {
+		if strings.TrimSpace(v) != "" {
+			q.Set(k, v)
+		}
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func decryptPolyvPDXText(pdxText string) (string, string, error) {
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(pdxText)), &envelope); err != nil {
+		return "", "", fmt.Errorf("zhaozhao polyv pdx parse: %w", err)
+	}
+	body := firstString(envelope, "body")
+	seed := firstNonEmpty(firstString(envelope, "seed_const"), firstString(envelope, "seedConst"), firstString(envelope, "seed"))
+	if body == "" || seed == "" {
+		return "", "", fmt.Errorf("zhaozhao polyv pdx: missing body or seed")
+	}
+	seed = normalizeSeed(seed)
+	keySeed := md5.Sum([]byte(polyvPDXSecret + seed))
+	key := []byte(hex.EncodeToString(keySeed[:])[1:17])
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", "", err
+	}
+	ciphertext, err := safeB64Decode(body)
+	if err != nil {
+		return "", "", fmt.Errorf("zhaozhao polyv pdx base64: %w", err)
+	}
+	if len(ciphertext) == 0 || len(ciphertext)%aes.BlockSize != 0 {
+		return "", "", fmt.Errorf("zhaozhao polyv pdx: ciphertext not block aligned")
+	}
+	plain := make([]byte, len(ciphertext))
+	cipher.NewCBCDecrypter(block, polyvPDXIVBytes).CryptBlocks(plain, ciphertext)
+	plain = stripPKCS7(plain)
+	return strings.TrimSpace(string(plain)), seed, nil
+}
+
+func normalizeSeed(seed string) string {
+	seed = strings.TrimSpace(seed)
+	var f float64
+	if _, err := fmt.Sscanf(seed, "%f", &f); err == nil {
+		return fmt.Sprintf("%d", int64(f))
+	}
+	return seed
+}
+
+func safeB64Decode(text string) ([]byte, error) {
+	text = strings.NewReplacer("-", "+", "_", "/").Replace(strings.TrimSpace(text))
+	text = regexp.MustCompile(`[^A-Za-z0-9+/=]`).ReplaceAllString(text, "")
+	text += strings.Repeat("=", (4-len(text)%4)%4)
+	return base64.StdEncoding.DecodeString(text)
+}
+
+func stripPKCS7(data []byte) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	pad := int(data[len(data)-1])
+	if pad <= 0 || pad > aes.BlockSize || pad > len(data) {
+		return data
+	}
+	for _, b := range data[len(data)-pad:] {
+		if int(b) != pad {
+			return data
+		}
+	}
+	return data[:len(data)-pad]
+}
+
+func buildPolyvPDXKeyURL(keyURL, m3u8URL, playToken, pid string) string {
+	keyURL = resolveAgainst(keyURL, m3u8URL)
+	if keyURL == "" || playToken == "" {
+		return ""
+	}
+	u, err := url.Parse(keyURL)
+	if err != nil {
+		return ""
+	}
+	path := u.Path
+	if strings.Contains(path, "/playsafe/") {
+		path = regexp.MustCompile(`/playsafe/(?:v\d+/)?`).ReplaceAllString(path, "/playsafe/v13/")
+	} else if strings.HasPrefix(path, "/") {
+		path = "/playsafe/v13" + path
+	} else {
+		path = "/playsafe/v13/" + path
+	}
+	q := u.Query()
+	q.Set("token", playToken)
+	if pid != "" {
+		q.Set("pid", pid)
+	}
+	u.Path = path
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func firstM3U8URI(text string) string {
+	if m := m3u8URIRe.FindStringSubmatch(text); len(m) == 2 {
+		return m[1]
+	}
+	return ""
+}
+
+func firstM3U8IV(text string) string {
+	if m := m3u8IVRe.FindStringSubmatch(text); len(m) == 2 {
+		return m[1]
+	}
+	return ""
+}
+
+func compactAnyMap(in map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range in {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
+			continue
+		}
+		if v != nil {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func priceFromAny(v any) (float64, bool) {
+	switch t := v.(type) {
+	case map[string]any:
+		for _, key := range priceKeys {
+			if raw, ok := t[key]; ok {
+				if price, ok := normalizePrice(raw); ok {
+					return price, true
+				}
+			}
+		}
+		for _, child := range t {
+			if price, ok := priceFromAny(child); ok {
+				return price, true
+			}
+		}
+	case []any:
+		for _, child := range t {
+			if price, ok := priceFromAny(child); ok {
+				return price, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func normalizePrice(v any) (float64, bool) {
+	s := strings.TrimSpace(fmt.Sprint(v))
+	if s == "" || s == "<nil>" {
+		return 0, false
+	}
+	m := priceNumberRe.FindString(strings.ReplaceAll(s, ",", ""))
+	if m == "" {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(m, 64)
+	if err != nil || f <= 0 {
+		return 0, false
+	}
+	return float64(int(f*100+0.5)) / 100, true
 }

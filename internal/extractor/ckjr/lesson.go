@@ -417,6 +417,21 @@ func apiResponseOK(payload any) bool {
 	return true
 }
 
+func apiLoginResponseOK(payload any) bool {
+	m := asMap(payload)
+	if len(m) == 0 {
+		return false
+	}
+	code := responseCode(payload)
+	if code != "200" {
+		return false
+	}
+	if v, ok := m["success"]; ok && !coerceBool(fmt.Sprint(v), true) {
+		return false
+	}
+	return true
+}
+
 func responseCode(payload any) string {
 	m := asMap(payload)
 	return firstNonEmpty(textValue(m, "statusCode"), textValue(m, "code"))

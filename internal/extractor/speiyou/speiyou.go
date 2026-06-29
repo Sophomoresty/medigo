@@ -39,23 +39,33 @@ func (s *Speiyou) Extract(rawURL string, opts *extractor.ExtractOpts) (*extracto
 		return nil, fmt.Errorf("speiyou requires login cookies")
 	}
 	auth := authFromJar(opts.Cookies)
+	parsedURL, _ := url.Parse(rawURL)
+	query := url.Values{}
+	if parsedURL != nil {
+		query = parsedURL.Query()
+	}
 	if auth.StuID == "" {
-		auth.StuID = first(match1(rawURL, `[?&]stuId=(\d+)`), match1(rawURL, `[?&]pu_uid=(\d+)`))
+		auth.StuID = first(query.Get("stuId"), query.Get("pu_uid"), match1(rawURL, `[?&]stuId=(\d+)`), match1(rawURL, `[?&]pu_uid=(\d+)`))
 	}
 	if auth.StuID == "" {
 		return nil, fmt.Errorf("speiyou requires stuId in login cookies or URL")
 	}
-	courseID := first(match1(rawURL, `[?&](?:stdCourseId|courseId|cid)=(\d+)`), match1(rawURL, `/course/(\d+)`))
-	stdSubject := first(match1(rawURL, `[?&]stdSubject=([^&#]+)`), "")
+	courseID := first(query.Get("stdCourseId"), query.Get("courseId"), query.Get("cid"), match1(rawURL, `[?&](?:stdCourseId|courseId|cid)=(\d+)`), match1(rawURL, `/course/(\d+)`))
+	stdSubject := first(query.Get("stdSubject"), match1(rawURL, `[?&]stdSubject=([^&#]+)`))
 	c := util.NewClient()
 	c.SetCookieJar(opts.Cookies)
 	h := baseHeaders(auth)
-	_, _ = requestJSON(c, fmt.Sprintf(subject_api, url.QueryEscape(auth.StuID)), h)
-	courses, lessons := fetchCourseAndLessons(c, h, auth.StuID, courseID, stdSubject)
+	subjects, err := validateSpeiyouLogin(c, h, auth.StuID)
+	if err != nil {
+		return nil, err
+	}
+	courses, lessons := fetchCourseAndLessons(c, h, auth.StuID, courseID, speiyouSubjectCandidates(stdSubject, subjects))
+	var price any
 	if courseID == "" && len(courses) > 0 {
 		courseID = courses[0].ID
 		stdSubject = first(stdSubject, courses[0].Subject)
 		lessons = courses[0].Lessons
+		price = courses[0].Price
 	}
 	if courseID == "" {
 		return nil, fmt.Errorf("cannot parse speiyou stdCourseId/courseId from URL")
@@ -69,7 +79,11 @@ func (s *Speiyou) Extract(rawURL string, opts *extractor.ExtractOpts) (*extracto
 	title := "speiyou_" + courseID
 	for _, cr := range courses {
 		if cr.ID == courseID && cr.Title != "" {
-			title = cr.Title
+			title = stripLessonCount(cr.Title)
+			stdSubject = first(stdSubject, cr.Subject)
+			if price == nil {
+				price = cr.Price
+			}
 			break
 		}
 	}
@@ -79,57 +93,123 @@ func (s *Speiyou) Extract(rawURL string, opts *extractor.ExtractOpts) (*extracto
 		if info.LiveID == "" {
 			continue
 		}
-		playURL := resolveVideo(c, h, auth, info)
+		playURL, entryPrice := resolveVideo(c, h, auth, info)
 		if playURL == "" {
 			continue
 		}
+		if price == nil {
+			price = entryPrice
+		}
 		format := pickFormat(playURL)
-		entries = append(entries, &extractor.MediaInfo{Site: "speiyou", Title: info.Title, Streams: map[string]extractor.Stream{"best": {Quality: "best", URLs: []string{playURL}, Format: format, NeedMerge: format == "m3u8", Headers: map[string]string{"Referer": referer, "Origin": "owcr://classroom", "User-Agent": USER_AGENT}}}, Extra: map[string]any{"live_id": info.LiveID, "std_course_id": info.StdCourseID, "std_subject": info.StdSubject}})
+		extra := map[string]any{"live_id": info.LiveID, "std_course_id": info.StdCourseID, "std_subject": info.StdSubject}
+		if entryPrice != nil {
+			extra["price"] = entryPrice
+		}
+		entries = append(entries, &extractor.MediaInfo{Site: "speiyou", Title: info.Title, Streams: map[string]extractor.Stream{"best": {Quality: "best", URLs: []string{playURL}, Format: format, NeedMerge: format == "m3u8", Headers: map[string]string{"Referer": referer, "Origin": "owcr://classroom", "User-Agent": USER_AGENT}}}, Extra: extra})
 	}
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("speiyou: no playback videoUrls returned from classroom API")
 	}
-	return &extractor.MediaInfo{Site: "speiyou", Title: sanitize(title), Entries: entries, Extra: map[string]any{"std_course_id": courseID, "stu_id": auth.StuID}}, nil
+	extra := map[string]any{"std_course_id": courseID, "stu_id": auth.StuID, "purchased": true}
+	if stdSubject != "" {
+		extra["std_subject"] = stdSubject
+	}
+	if price != nil {
+		extra["price"] = price
+	}
+	return &extractor.MediaInfo{Site: "speiyou", Title: sanitize(title), Entries: entries, Extra: extra}, nil
 }
 
 type authInfo struct{ Token, StuID, Cookie string }
 type courseRef struct {
 	ID, Title, Subject string
 	Lessons            []map[string]any
+	Price              any
+	LastTime           int64
 }
 type lessonInfo struct {
 	Raw                                                                                                           map[string]any
 	LiveID, Title, StdCourseID, StdSubject, StdGrade, StdClassID, BranchID, AreaID, LecturerID, TutorID, LiveType string
+	Price                                                                                                         any
 }
 
-func fetchCourseAndLessons(c *util.Client, h map[string]string, stuID, courseID, subject string) ([]courseRef, []map[string]any) {
-	live := fetchLiveList(c, h, stuID, subject, "1", "desc", 50)
-	grouped := map[string]*courseRef{}
-	for _, lesson := range live {
-		id := courseKey(lesson)
-		if id == "" {
-			continue
-		}
-		cr := grouped[id]
-		if cr == nil {
-			cr = &courseRef{ID: id, Title: sanitize(first(textAt(lesson, "courseName", "name"), "未命名课程")), Subject: textAt(lesson, "stdSubject")}
-			grouped[id] = cr
-		}
-		cr.Lessons = append(cr.Lessons, lesson)
+func validateSpeiyouLogin(c *util.Client, h map[string]string, stuID string) ([]map[string]any, error) {
+	resp, err := requestJSON(c, fmt.Sprintf(subject_api, url.QueryEscape(stuID)), h)
+	if err != nil {
+		return nil, fmt.Errorf("speiyou subject-list login check: %w", err)
 	}
-	for page := 1; page <= 200; page++ {
-		resp, err := requestJSON(c, fmt.Sprintf(course_list_api, url.QueryEscape(subject), page, url.QueryEscape(stuID)), h)
-		if err != nil {
+	if !validSubjectResponse(resp) {
+		return nil, fmt.Errorf("speiyou login check failed: subject-list response has no list payload")
+	}
+	return jsonToMaps(resp), nil
+}
+
+func speiyouSubjectCandidates(seed string, subjects []map[string]any) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	add("")
+	add(seed)
+	for _, subject := range subjects {
+		add(first(textAt(subject, "stdSubject"), textAt(subject, "subject"), textAt(subject, "code")))
+	}
+	return out
+}
+
+func fetchCourseAndLessons(c *util.Client, h map[string]string, stuID, courseID string, subjects []string) ([]courseRef, []map[string]any) {
+	if len(subjects) == 0 {
+		subjects = []string{""}
+	}
+	allLive := []map[string]any{}
+	grouped := map[string]*courseRef{}
+	for _, subject := range subjects {
+		live := fetchLiveList(c, h, stuID, subject, "1", "desc", 50)
+		allLive = append(allLive, live...)
+		mergeCourseGroups(grouped, groupLiveCourses(live))
+		if len(live) > 0 && subject == "" {
 			break
 		}
-		items := jsonToMaps(resp)
-		for _, it := range items {
-			id := courseKey(it)
-			if id != "" && grouped[id] == nil {
-				grouped[id] = &courseRef{ID: id, Title: sanitize(first(textAt(it, "courseName", "name", "title"), "未命名课程")), Subject: textAt(it, "stdSubject")}
+	}
+
+	for _, subject := range subjects {
+		found := false
+		for page := 1; page <= 200; page++ {
+			resp, err := requestJSON(c, fmt.Sprintf(course_list_api, url.QueryEscape(subject), page, url.QueryEscape(stuID)), h)
+			if err != nil {
+				break
+			}
+			items := jsonToMaps(resp)
+			if len(items) > 0 {
+				found = true
+			}
+			for _, it := range items {
+				id := courseKey(it)
+				if id == "" {
+					continue
+				}
+				cr := grouped[id]
+				if cr == nil {
+					cr = &courseRef{ID: id, Title: sanitize(first(textAt(it, "courseName", "name", "title"), "未命名课程")), Subject: first(textAt(it, "stdSubject"), subject), Price: extractPrice(it)}
+					grouped[id] = cr
+				} else {
+					cr.Title = first(cr.Title, sanitize(first(textAt(it, "courseName", "name", "title"), "未命名课程")))
+					cr.Subject = first(cr.Subject, textAt(it, "stdSubject"), subject)
+					if cr.Price == nil {
+						cr.Price = extractPrice(it)
+					}
+				}
+			}
+			if len(items) < 20 {
+				break
 			}
 		}
-		if len(items) < 20 {
+		if found && subject == "" {
 			break
 		}
 	}
@@ -138,14 +218,84 @@ func fetchCourseAndLessons(c *util.Client, h map[string]string, stuID, courseID,
 		sort.SliceStable(cr.Lessons, func(i, j int) bool {
 			return intAt(cr.Lessons[i], "liveStarttime") < intAt(cr.Lessons[j], "liveStarttime")
 		})
+		cr.LastTime = maxCourseTime(cr.Lessons, cr.LastTime)
+		if len(cr.Lessons) > 0 {
+			cr.Title = formatCourseTitle(cr.Title, len(cr.Lessons))
+		}
 		out = append(out, *cr)
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Title < out[j].Title })
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].LastTime != out[j].LastTime {
+			return out[i].LastTime > out[j].LastTime
+		}
+		return out[i].Title < out[j].Title
+	})
 	if courseID == "" {
 		return out, nil
 	}
-	return out, filterLessons(live, courseID)
+	if cr := grouped[courseID]; cr != nil && len(cr.Lessons) > 0 {
+		return out, cr.Lessons
+	}
+	return out, filterLessons(allLive, courseID)
 }
+
+func groupLiveCourses(live []map[string]any) map[string]*courseRef {
+	grouped := map[string]*courseRef{}
+	for _, lesson := range live {
+		id := courseKey(lesson)
+		if id == "" {
+			continue
+		}
+		cr := grouped[id]
+		if cr == nil {
+			cr = &courseRef{
+				ID:       id,
+				Title:    sanitize(first(textAt(lesson, "courseName", "name", "title"), "未命名课程")),
+				Subject:  first(textAt(lesson, "stdSubject"), textAt(lesson, "subjectName")),
+				Price:    extractPrice(lesson),
+				LastTime: intAt(lesson, "liveStarttime"),
+			}
+			grouped[id] = cr
+		}
+		if cr.Price == nil {
+			cr.Price = extractPrice(lesson)
+		}
+		cr.LastTime = maxInt64(cr.LastTime, intAt(lesson, "liveStarttime"))
+		cr.Lessons = append(cr.Lessons, lesson)
+	}
+	return grouped
+}
+
+func mergeCourseGroups(dst, src map[string]*courseRef) {
+	for id, incoming := range src {
+		cur := dst[id]
+		if cur == nil {
+			dst[id] = incoming
+			continue
+		}
+		cur.Title = first(stripLessonCount(cur.Title), stripLessonCount(incoming.Title), "未命名课程")
+		cur.Subject = first(cur.Subject, incoming.Subject)
+		if cur.Price == nil {
+			cur.Price = incoming.Price
+		}
+		cur.LastTime = maxInt64(cur.LastTime, incoming.LastTime)
+		seenLessons := map[string]bool{}
+		for _, lesson := range cur.Lessons {
+			if key := lessonKey(lesson); key != "" {
+				seenLessons[key] = true
+			}
+		}
+		for _, lesson := range incoming.Lessons {
+			key := lessonKey(lesson)
+			if key == "" || seenLessons[key] {
+				continue
+			}
+			seenLessons[key] = true
+			cur.Lessons = append(cur.Lessons, lesson)
+		}
+	}
+}
+
 func fetchLiveList(c *util.Client, h map[string]string, stuID, subject, status, order string, perPage int) []map[string]any {
 	var out []map[string]any
 	seen := map[string]bool{}
@@ -194,9 +344,25 @@ func filterLessons(list []map[string]any, courseID string) []map[string]any {
 	return out
 }
 func normalizeLesson(m map[string]any, index int, courseID, subject string) lessonInfo {
-	return lessonInfo{Raw: m, LiveID: lessonKey(m), Title: sanitize(fmt.Sprintf("[%d]--%s", index, first(textAt(m, "liveName", "title", "name"), "未命名课时"))), StdCourseID: first(textAt(m, "stdCourseId", "courseId"), courseID), StdSubject: first(textAt(m, "stdSubject"), subject), StdGrade: textAt(m, "stdGrade"), StdClassID: textAt(m, "stdClassId"), BranchID: first(textAt(m, "branchId"), textAt(m, "areaId")), AreaID: textAt(m, "areaId"), LecturerID: textAt(m, "lecturerId"), TutorID: textAt(m, "tutorId"), LiveType: first(textAt(m, "liveTypeString", "liveType"), "SMALL_GROUPS_V2_MODE")}
+	live, course, classInfo, teacher := unwrapMap(m["liveInfo"]), unwrapMap(m["courseInfo"]), unwrapMap(m["classInfo"]), unwrapMap(m["teacher"])
+	title := first(textAt(m, "liveName", "title", "name"), textAt(live, "liveName", "title", "name"), "未命名课时")
+	return lessonInfo{
+		Raw:         m,
+		LiveID:      lessonKey(m),
+		Title:       sanitize(fmt.Sprintf("[%d]--%s", index, title)),
+		StdCourseID: first(textAt(m, "stdCourseId", "course_id", "courseId"), textAt(course, "stdCourseId", "course_id", "courseId"), courseID),
+		StdSubject:  first(textAt(m, "stdSubject"), textAt(course, "stdSubject"), textAt(live, "stdSubject"), subject),
+		StdGrade:    first(textAt(m, "stdGrade"), textAt(course, "stdGrade")),
+		StdClassID:  first(textAt(m, "stdClassId", "classId"), textAt(classInfo, "stdClassId", "classId")),
+		BranchID:    first(textAt(m, "branchId"), textAt(course, "branchId"), textAt(m, "areaId"), textAt(live, "areaId")),
+		AreaID:      first(textAt(m, "areaId"), textAt(live, "areaId")),
+		LecturerID:  first(textAt(m, "lecturerId"), textAt(teacher, "lecturerId")),
+		TutorID:     first(textAt(m, "tutorId"), textAt(teacher, "tutorId")),
+		LiveType:    first(textAt(m, "liveTypeString", "liveType"), textAt(live, "liveTypeString", "liveType"), "SMALL_GROUPS_V2_MODE"),
+		Price:       extractPrice(m),
+	}
 }
-func resolveVideo(c *util.Client, base map[string]string, auth authInfo, info lessonInfo) string {
+func resolveVideo(c *util.Client, base map[string]string, auth authInfo, info lessonInfo) (string, any) {
 	h := playbackHeaders(base, auth, info)
 	if resp, err := requestJSON(c, auth_api, h); err == nil {
 		mergeAuthInfo(&info, unwrapMap(resp))
@@ -204,22 +370,32 @@ func resolveVideo(c *util.Client, base map[string]string, auth authInfo, info le
 	}
 	resp, err := requestJSON(c, video_api, h)
 	if err != nil {
-		return ""
+		return "", info.Price
 	}
 	m := unwrapMap(resp)
 	urls := valueStrings(m["videoUrls"])
 	if len(urls) == 0 {
 		urls = valueStrings(m["videoUrl"])
 	}
-	for _, u := range urls {
-		if strings.HasPrefix(strings.TrimSpace(u), "http") {
-			return strings.TrimSpace(u)
+	if len(urls) == 0 {
+		data := unwrapMap(m["data"])
+		urls = valueStrings(data["videoUrls"])
+		if len(urls) == 0 {
+			urls = valueStrings(data["videoUrl"])
 		}
 	}
-	return findURL(m)
+	for _, u := range urls {
+		if strings.HasPrefix(strings.TrimSpace(u), "http") {
+			return strings.TrimSpace(u), info.Price
+		}
+	}
+	return findURL(m), info.Price
 }
 func mergeAuthInfo(info *lessonInfo, m map[string]any) {
 	init := unwrapMap(m["initData"])
+	if len(init) == 0 {
+		init = unwrapMap(unwrapMap(m["data"])["initData"])
+	}
 	live, course, classInfo, teacher := unwrapMap(init["live"]), unwrapMap(init["course"]), unwrapMap(init["classInfo"]), unwrapMap(init["teacher"])
 	info.StdSubject = first(info.StdSubject, textAt(live, "stdSubject"), textAt(course, "stdSubject"))
 	info.StdGrade = first(info.StdGrade, textAt(course, "stdGrade"))
@@ -229,6 +405,23 @@ func mergeAuthInfo(info *lessonInfo, m map[string]any) {
 	info.LiveType = first(info.LiveType, textAt(live, "liveTypeString"), "SMALL_GROUPS_V2_MODE")
 	info.LecturerID = first(info.LecturerID, textAt(teacher, "lecturerId"))
 	info.TutorID = first(info.TutorID, textAt(teacher, "tutorId"))
+	if info.Price == nil {
+		info.Price = extractPrice(init)
+	}
+	for _, item := range listValues(teacher["teacherList"]) {
+		tm := unwrapMap(item)
+		teacherID := first(textAt(tm, "teacherId", "id"))
+		if teacherID == "" {
+			continue
+		}
+		role := strings.ToLower(first(textAt(tm, "teacherType", "role")))
+		switch {
+		case info.LecturerID == "" && (role == "" || role == "1" || role == "lecturer" || role == "主讲"):
+			info.LecturerID = teacherID
+		case info.TutorID == "":
+			info.TutorID = teacherID
+		}
+	}
 }
 func playbackHeaders(base map[string]string, auth authInfo, i lessonInfo) map[string]string {
 	h := clone(base)

@@ -3,9 +3,11 @@ package tmooc
 import (
 	"fmt"
 	"html"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/Sophomoresty/mediago/internal/extractor"
@@ -30,6 +32,7 @@ func headersFromJar(j http.CookieJar) map[string]string {
 func media(site, title, u string, extra map[string]any) *extractor.MediaInfo {
 	return &extractor.MediaInfo{Site: site, Title: sanitize(title), Streams: map[string]extractor.Stream{"best": {Quality: "best", URLs: []string{u}, Format: pickFormat(u), Headers: map[string]string{"Referer": referer, "User-Agent": USER_AGENT}}}, Extra: extra}
 }
+
 var attrRe = regexp.MustCompile(`(?is)([\w:-]+)\s*=\s*(?:"([^"]*?)"|'([^']*?)')`)
 
 func parseAttrs(s string) map[string]string {
@@ -86,11 +89,11 @@ func collectIDs(m map[string]any) []string {
 		}
 	}
 	walk(m)
-	return out
+	return unique(out)
 }
 func extractCourseTitle(m map[string]any) string {
 	for _, x := range append([]map[string]any{m}, nestedMaps(m)...) {
-		if s := textAt(x, "courseVersion", "courseName", "name", "title", "versionName"); s != "" {
+		if s := textAt(x, "courseVersion", "courseName", "name", "title", "versionName", "courseTitle"); s != "" {
 			return sanitize(s)
 		}
 	}
@@ -224,4 +227,122 @@ func pickFormat(u string) string {
 		return p[i+1:]
 	}
 	return "mp4"
+}
+
+func unique(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+func extractToken(v any) string {
+	for _, key := range []string{"token", "Authorization", "authorization", "accessToken", "access_token"} {
+		if s := findText(v, key); s != "" {
+			return strings.TrimPrefix(strings.TrimSpace(s), "Bearer ")
+		}
+	}
+	return ""
+}
+
+func setTokenHeaders(h map[string]string, token string) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return
+	}
+	h["Authorization"] = token
+	h["authorization"] = token
+}
+
+func setStuClassHeaders(h map[string]string, stuClassID string) {
+	stuClassID = strings.TrimSpace(stuClassID)
+	if stuClassID == "" {
+		return
+	}
+	h["X-Stu-Class-Id"] = stuClassID
+	h["x-stu-class-id"] = stuClassID
+}
+
+func extractCoursePrice(m map[string]any) float64 {
+	for _, x := range append([]map[string]any{m}, nestedMaps(m)...) {
+		for _, key := range []string{"price", "coursePrice", "payPrice", "originalPrice", "discountPrice", "discountBuyPrice", "markedPrice"} {
+			if price := normalizePrice(x[key]); price > 0 {
+				return price
+			}
+		}
+	}
+	return 0
+}
+
+func extractWebCoursePrice(page string) float64 {
+	for _, pat := range []string{
+		`priceStr["']?\s*[:=]\s*["']?([0-9]+(?:\.[0-9]+)?)`,
+		`discountBuyPrice["']?\s*[:=]\s*["']?([0-9]+(?:\.[0-9]+)?)`,
+		`discountPrice["']?\s*[:=]\s*["']?([0-9]+(?:\.[0-9]+)?)`,
+		`markedPrice["']?\s*[:=]\s*["']?([0-9]+(?:\.[0-9]+)?)`,
+		`price["']?\s*[:=]\s*["']?([0-9]+(?:\.[0-9]+)?)`,
+	} {
+		if price := normalizePrice(match1(page, pat)); price > 0 {
+			return price
+		}
+	}
+	return 0
+}
+
+func normalizePrice(value any) float64 {
+	if value == nil {
+		return 0
+	}
+	text := strings.TrimSpace(fmt.Sprint(value))
+	if text == "" || text == "<nil>" {
+		return 0
+	}
+	replacer := strings.NewReplacer(",", "", "¥", "", "￥", "", "元", "")
+	text = strings.TrimSpace(replacer.Replace(text))
+	price, err := strconv.ParseFloat(text, 64)
+	if err != nil || price < 0 {
+		return 0
+	}
+	if price >= 1000 && math.Trunc(price) == price {
+		price /= 100
+	}
+	return math.Round(price*100) / 100
+}
+
+func extractCoursePurchased(m map[string]any) bool {
+	for _, x := range append([]map[string]any{m}, nestedMaps(m)...) {
+		for _, key := range []string{"purchased", "isBuy", "is_buy", "isPurchased", "currentUserBuy", "current_user_buy", "buyStatus", "orderStatus"} {
+			if value, ok := x[key]; ok && value != nil {
+				return coerceBool(value, true)
+			}
+		}
+	}
+	return true
+}
+
+func coerceBool(value any, def bool) bool {
+	if value == nil {
+		return def
+	}
+	if b, ok := value.(bool); ok {
+		return b
+	}
+	text := strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
+	switch text {
+	case "", "<nil>", "none", "null":
+		return def
+	case "0", "false", "no", "n":
+		return false
+	case "1", "true", "yes", "y":
+		return true
+	default:
+		return true
+	}
 }

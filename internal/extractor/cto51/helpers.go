@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"mime"
 	"net/url"
 	"path"
 	"regexp"
@@ -15,6 +16,13 @@ import (
 	"github.com/Sophomoresty/mediago/internal/extractor"
 	"github.com/Sophomoresty/mediago/internal/util"
 )
+
+type fileDownloadMeta struct {
+	URL    string
+	Title  string
+	Format string
+	Size   int64
+}
 
 func parseRoute(raw string) route {
 	var r route
@@ -234,6 +242,190 @@ func extractTitle(body string) string {
 		return ""
 	}
 	return firstNonEmpty(cleanText(m[1]), cleanText(m[2]))
+}
+func normalizePriceValue(raw string) string {
+	s := strings.TrimSpace(strings.Trim(raw, `"'`))
+	if s == "" {
+		return ""
+	}
+	s = strings.TrimPrefix(strings.TrimSpace(s), "￥")
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || f < 0 {
+		return ""
+	}
+	if f >= 1000 && f == float64(int64(f)) {
+		f = f / 100
+	}
+	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", f), "0"), ".")
+}
+func normalizePriceOrDefault(raw string) string {
+	if price := normalizePriceValue(raw); price != "" {
+		if price != "0" {
+			return price
+		}
+	}
+	return defaultCoursePrice
+}
+func extractPriceFromHTML(text string) string {
+	if text == "" {
+		return ""
+	}
+	if m := priceVarRe.FindStringSubmatch(text); len(m) > 1 {
+		return normalizePriceValue(m[1])
+	}
+	if m := rmbPriceRe.FindStringSubmatch(text); len(m) > 1 {
+		return normalizePriceValue(m[1])
+	}
+	if strings.Contains(text, "免费") {
+		return "0"
+	}
+	return ""
+}
+func priceFromPayloads(payloads []any) string {
+	for _, m := range walkMaps(payloads) {
+		if textValue(m, "lesson_id", "lessonId", "file_id", "fileId") != "" || looksLikeFileMap(m) {
+			continue
+		}
+		if price := pickNormalizedPrice(m, "price", "course_price", "coursePrice", "pay_price", "payPrice", "sale_price", "salePrice", "discount_price", "discountPrice", "learnCoinPrice", "original_price", "originalPrice"); price != "" {
+			return price
+		}
+	}
+	return ""
+}
+func trainingPriceFromPayloads(payloads []any, trainID string) string {
+	prices := extractTrainingOrderPrices(payloads)
+	if price := normalizePriceValue(prices[strings.TrimSpace(trainID)]); price != "" {
+		return price
+	}
+	return ""
+}
+func extractTrainingOrderPrices(v any) map[string]string {
+	out := map[string]string{}
+	var walk func(any, bool, string)
+	walk = func(node any, trainingContext bool, inheritedPrice string) {
+		switch x := node.(type) {
+		case []any:
+			for _, item := range x {
+				walk(item, trainingContext, inheritedPrice)
+			}
+		case map[string]any:
+			isTraining := trainingContext || looksLikeTrainingOrderItem(x)
+			price := pickNormalizedPrice(x, "original_price", "originalPrice", "trade_original_price", "tradeOriginalPrice", "total_price", "totalPrice", "total_price_tp", "totalPriceTp", "pay_price", "payPrice", "trade_pay_price", "tradePayPrice", "price", "course_price", "coursePrice", "train_price", "trainPrice")
+			if price == "" {
+				price = inheritedPrice
+			}
+			if isTraining && price != "" {
+				if id := firstNonEmpty(trainingOrderTrainID(x), textValue(x, "train_id", "trainId", "training_id", "trainingId")); id != "" {
+					out[id] = price
+				}
+			}
+			for _, child := range x {
+				walk(child, isTraining, price)
+			}
+		}
+	}
+	walk(v, false, "")
+	return out
+}
+func pickNormalizedPrice(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if price := normalizePriceValue(textValue(m, key)); price != "" && price != "0" {
+			return price
+		}
+	}
+	return ""
+}
+func looksLikeTrainingOrderItem(m map[string]any) bool {
+	var parts []string
+	for _, key := range []string{"good_type_title", "goodTypeTitle", "good_type_name", "goodTypeName", "good_title", "goodTitle", "title", "name", "good_url", "goodUrl", "url", "course_url", "courseUrl", "jump_url", "jumpUrl"} {
+		if s := textValue(m, key); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	text := strings.ToLower(strings.ReplaceAll(strings.Join(parts, " "), `\/`, "/"))
+	return strings.Contains(text, "精品班") || strings.Contains(text, "/px/train/") || strings.Contains(text, "/training_") || strings.Contains(text, "/center/wejob/") || strings.Contains(text, "train_id=")
+}
+func trainingOrderTrainID(m map[string]any) string {
+	for _, key := range []string{"good_url", "goodUrl", "url", "course_url", "courseUrl", "jump_url", "jumpUrl"} {
+		if id := trainIDFromURL(textValue(m, key)); id != "" {
+			return id
+		}
+	}
+	return textValue(m, "train_id", "trainId", "training_id", "trainingId", "good_id", "goodId")
+}
+func nestedFileURL(v any) string {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	return textValue(m, "url", "fileUrl", "file_url", "downloadUrl", "download_url")
+}
+func resolveFileDownloadMeta(c *util.Client, raw string, h map[string]string) fileDownloadMeta {
+	if c == nil || strings.TrimSpace(raw) == "" {
+		return fileDownloadMeta{}
+	}
+	resp, err := c.Get(raw, h)
+	if err != nil {
+		return fileDownloadMeta{}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fileDownloadMeta{}
+	}
+	out := fileDownloadMeta{URL: raw, Size: resp.ContentLength}
+	if resp.Request != nil && resp.Request.URL != nil {
+		out.URL = resp.Request.URL.String()
+	}
+	out.Title = contentDispositionFilename(resp.Header.Get("Content-Disposition"))
+	out.Format = firstNonEmpty(mediaFormat(out.URL), mediaFormat(out.Title), extFromContentType(resp.Header.Get("Content-Type")))
+	return out
+}
+func contentDispositionFilename(header string) string {
+	if strings.TrimSpace(header) == "" {
+		return ""
+	}
+	for _, part := range strings.Split(header, ";") {
+		part = strings.TrimSpace(part)
+		lower := strings.ToLower(part)
+		switch {
+		case strings.HasPrefix(lower, "filename*="):
+			value := strings.TrimSpace(part[len("filename*="):])
+			value = strings.Trim(value, `"`)
+			if i := strings.Index(value, "''"); i >= 0 {
+				value = value[i+2:]
+			}
+			if decoded, err := url.QueryUnescape(value); err == nil {
+				value = decoded
+			}
+			return strings.TrimSpace(value)
+		case strings.HasPrefix(lower, "filename="):
+			value := strings.Trim(strings.TrimSpace(part[len("filename="):]), `"`)
+			if decoded, err := url.QueryUnescape(value); err == nil {
+				value = decoded
+			}
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+func extFromContentType(contentType string) string {
+	contentType = strings.TrimSpace(strings.Split(contentType, ";")[0])
+	if contentType == "" {
+		return ""
+	}
+	switch contentType {
+	case "application/vnd.apple.mpegurl", "application/x-mpegURL":
+		return "m3u8"
+	case "application/pdf":
+		return "pdf"
+	case "application/zip":
+		return "zip"
+	}
+	exts, err := mime.ExtensionsByType(contentType)
+	if err != nil || len(exts) == 0 {
+		return ""
+	}
+	return strings.TrimPrefix(strings.ToLower(exts[0]), ".")
 }
 func cleanText(s string) string {
 	return strings.Join(strings.Fields(regexp.MustCompile(`(?s)<[^>]+>`).ReplaceAllString(html.UnescapeString(s), " ")), " ")

@@ -7,8 +7,16 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/Sophomoresty/mediago/internal/util"
+)
+
+var (
+	smExtXURIRe = regexp.MustCompile(`URI="([^"]*)"`)
+	smKeyIDRe   = regexp.MustCompile(`keys/([^/?#"]+)`)
 )
 
 func selectVideoItem(r map[string]any) map[string]any {
@@ -224,6 +232,186 @@ func privateToPublic(s string) string {
 	}
 	u.Host = strings.Replace(strings.Replace(u.Host, "-private.", ".", 1), "ndr-private.", "ndr.", 1)
 	return u.String()
+}
+
+func (x *smCtx) prepareM3U8(raw string) (string, string, error) {
+	text, err := x.c.GetString(raw, x.requestHeaders(raw, true))
+	if err != nil {
+		return "", "", err
+	}
+	if !strings.HasPrefix(strings.TrimSpace(text), "#EXTM3U") {
+		return "", "", fmt.Errorf("smartedu: not an m3u8 manifest")
+	}
+	rewritten := x.absoluteM3U8Text(text, raw)
+	return smarteduM3U8DataURL(rewritten), rewritten, nil
+}
+
+func (x *smCtx) absoluteM3U8Text(text, base string) string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "":
+			out = append(out, line)
+		case strings.HasPrefix(trimmed, "#EXT-X-KEY"):
+			out = append(out, x.rewriteM3U8URI(line, base, true))
+		case strings.HasPrefix(trimmed, "#EXT-X-MAP"):
+			out = append(out, x.rewriteM3U8URI(line, base, false))
+		case strings.HasPrefix(trimmed, "#"):
+			out = append(out, line)
+		case strings.HasPrefix(trimmed, "data:"):
+			out = append(out, line)
+		default:
+			out = append(out, x.withAccess(resolveSmarteduURL(trimmed, base)))
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func (x *smCtx) rewriteM3U8URI(line, base string, isKey bool) string {
+	return smExtXURIRe.ReplaceAllStringFunc(line, func(match string) string {
+		parts := smExtXURIRe.FindStringSubmatch(match)
+		if len(parts) < 2 {
+			return match
+		}
+		resolved := resolveSmarteduURL(parts[1], base)
+		if !isKey {
+			return `URI="` + x.withAccess(resolved) + `"`
+		}
+		signed := x.signedVideoKeyURL(resolved)
+		if body, err := x.c.GetBytes(signed, x.requestHeaders(signed, true)); err == nil {
+			if key := x.decryptSmarteduKey(body); len(key) > 0 {
+				return `URI="data:application/octet-stream;base64,` + base64.StdEncoding.EncodeToString(key) + `"`
+			}
+		}
+		return `URI="` + signed + `"`
+	})
+}
+
+func (x *smCtx) signedVideoKeyURL(keyURL string) string {
+	keyURL = normalize(keyURL, "")
+	if !strings.HasPrefix(strings.ToLower(keyURL), "http") {
+		return keyURL
+	}
+	signsURL := strings.TrimRight(keyURL, "/") + "/signs"
+	body, err := x.c.GetBytes(signsURL, x.requestHeaders(signsURL, true))
+	if err != nil {
+		return keyURL
+	}
+	var resp map[string]any
+	if json.Unmarshal(body, &resp) != nil {
+		return keyURL
+	}
+	nonce := str(resp["nonce"])
+	if nonce == "" {
+		return keyURL
+	}
+	keyID := ""
+	if m := smKeyIDRe.FindStringSubmatch(keyURL); len(m) > 1 {
+		keyID = m[1]
+	} else if u, err := url.Parse(keyURL); err == nil {
+		keyID = path.Base(u.Path)
+	}
+	if keyID == "" {
+		return keyURL
+	}
+	sign := util.MD5(nonce + keyID)
+	if len(sign) > 16 {
+		sign = sign[:16]
+	}
+	x.lastVideoKeySign = sign
+	u, err := url.Parse(keyURL)
+	if err != nil {
+		return keyURL
+	}
+	q := u.Query()
+	q.Set("nonce", nonce)
+	q.Set("sign", sign)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func (x *smCtx) decryptSmarteduKey(content []byte) []byte {
+	if len(content) == 0 {
+		return nil
+	}
+	var resp map[string]any
+	if json.Unmarshal(content, &resp) != nil {
+		return content
+	}
+	encoded := str(resp["key"])
+	sign := firstNonEmpty(str(resp["_smartedu_sign"]), x.lastVideoKeySign)
+	if encoded == "" || sign == "" {
+		return nil
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil
+	}
+	plain, err := util.AESDecryptECB(ciphertext, []byte(sign))
+	if err != nil {
+		return nil
+	}
+	return plain
+}
+
+func resolveSmarteduURL(raw, base string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.HasPrefix(raw, "data:") {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err == nil && u.IsAbs() {
+		return raw
+	}
+	b, err := url.Parse(base)
+	if err != nil {
+		return normalize(raw, privateHost)
+	}
+	ref, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	return b.ResolveReference(ref).String()
+}
+
+func smarteduM3U8DataURL(text string) string {
+	return "data:application/vnd.apple.mpegurl;base64," + base64.StdEncoding.EncodeToString([]byte(text))
+}
+
+func isM3U8URL(u, fmtv string) bool {
+	lu := strings.ToLower(u)
+	return strings.EqualFold(fmtv, "m3u8") || strings.Contains(lu, ".m3u8") || strings.HasPrefix(lu, "data:application/vnd.apple.mpegurl")
+}
+
+func tagSet(m map[string]any) map[string]bool {
+	out := map[string]bool{}
+	var walk func(any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case string:
+			if s := strings.TrimSpace(x); s != "" {
+				out[s] = true
+			}
+		case []any:
+			for _, it := range x {
+				walk(it)
+			}
+		case map[string]any:
+			for _, key := range []string{"id", "tag_id", "tagId", "code", "value"} {
+				if s := str(x[key]); s != "" {
+					out[s] = true
+				}
+			}
+			for _, key := range []string{"tag_list", "tags", "children"} {
+				walk(x[key])
+			}
+		}
+	}
+	walk(m["tag_list"])
+	walk(m["tags"])
+	return out
 }
 
 func cookieHeader(jar http.CookieJar, bases []string) string {

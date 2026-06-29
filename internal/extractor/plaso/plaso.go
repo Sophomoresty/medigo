@@ -2,6 +2,7 @@
 package plaso
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -82,13 +83,16 @@ type fileItem struct {
 }
 
 type courseInfo struct {
-	ID       string
-	Title    string
-	Source   string
-	History  bool
-	Homework bool
-	Class    bool
-	Origin   bool
+	ID        string
+	Title     string
+	Source    string
+	History   bool
+	Homework  bool
+	Class     bool
+	Origin    bool
+	Price     string
+	Purchased bool
+	Raw       map[string]any
 }
 
 type plasoSource struct {
@@ -129,19 +133,24 @@ func (s *Plaso) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.
 		}
 	}
 
+	var selected courseInfo
 	if len(files) == 0 {
 		courses := sess.fetchCourseList()
-		if cid == "" && len(courses) > 0 {
-			cid = courses[0].ID
-			cidKind, resolvedCID = splitPlasoCourseID(cid)
+		if cid == "" {
+			if len(courses) > 0 {
+				return buildCourseListMedia(courses, sess.eps.platform), nil
+			}
+			return nil, fmt.Errorf("plaso: no course id in URL and no courses found")
 		}
 		for _, co := range courses {
 			if sameID(co.ID, cid) {
+				selected = co
 				title = firstNonEmpty(co.Title, title)
+				cidKind, resolvedCID = splitPlasoCourseID(co.ID)
 				break
 			}
 		}
-		files = append(files, sess.fetchPackageFiles(resolvedCID)...)
+		files = append(files, sess.fetchFilesForCourse(cidKind, resolvedCID)...)
 	}
 	if len(files) == 0 {
 		return nil, fmt.Errorf("plaso: no file/task records found from share/package APIs")
@@ -170,6 +179,12 @@ func (s *Plaso) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.
 	extra := map[string]any{"course_id": cid, "resolved_id": resolvedCID, "platform": sess.eps.platform}
 	if cidKind != "" {
 		extra["course_kind"] = cidKind
+	}
+	if selected.Price != "" {
+		extra["price"] = selected.Price
+	}
+	if selected.Purchased {
+		extra["purchased"] = true
 	}
 	if unresolved > 0 {
 		extra["unresolved_count"] = unresolved
@@ -236,7 +251,7 @@ func (e plasoEndpoints) headers(jar http.CookieJar) map[string]string {
 func (s *plasoSession) checkCookie() error {
 	v, err := s.postJSON(s.eps.url(checkCookiePath), map[string]string{})
 	if err != nil {
-		return nil
+		return fmt.Errorf("plaso cookie validation failed: %w", err)
 	}
 	code := findFirst(v, "code")
 	if code != "" && code != "0" {
@@ -271,6 +286,33 @@ func (s *plasoSession) fetchCourseList() []courseInfo {
 				break
 			}
 			added := 0
+			if api.name == "history" {
+				for _, f := range s.historyItemsFromPayload(v) {
+					id := firstNonEmpty(f.ID, f.MyID)
+					if id == "" || f.Name == "" || seen[api.name+":"+id] {
+						continue
+					}
+					seen[api.name+":"+id] = true
+					out = append(out, courseInfo{ID: "history_" + strings.TrimPrefix(id, "history_"), Title: prefixTitle("历史课堂_", f.Name), Source: api.name, History: true, Purchased: true, Raw: f.Raw})
+					added++
+				}
+			}
+			if api.name == "homework" {
+				for _, co := range homeworkCoursesFromPayload(v) {
+					if co.ID == "" || co.Title == "" || seen[api.name+":"+co.ID] {
+						continue
+					}
+					seen[api.name+":"+co.ID] = true
+					out = append(out, co)
+					added++
+				}
+			}
+			if api.name == "history" || api.name == "homework" {
+				if !api.paged || added == 0 {
+					break
+				}
+				continue
+			}
 			walk(v, func(m map[string]any) {
 				co := courseInfoFromMap(api.name, m)
 				if co.ID == "" || co.Title == "" || seen[api.name+":"+co.ID] {
@@ -315,7 +357,54 @@ func courseInfoFromMap(source string, m map[string]any) courseInfo {
 	default:
 		co.Origin = truthy(m["is_origin"]) || truthy(m["isOrigin"]) || truthy(m["origin"])
 	}
+	co.Price = firstText(m, "price", "salePrice", "payPrice", "orderPrice", "amount", "cost", "goodsPrice", "discountPrice", "unitPrice")
+	co.Purchased = truthy(m["purchased"]) || truthy(m["isBuy"]) || truthy(m["isBought"]) || truthy(m["hasBuy"]) || truthy(m["isPurchased"]) ||
+		truthy(m["canStudy"]) || truthy(m["permission"]) || truthy(m["buy"]) || strings.EqualFold(firstText(m, "status"), "purchased")
+	co.Raw = m
 	return co
+}
+
+func buildCourseListMedia(courses []courseInfo, platform string) *extractor.MediaInfo {
+	entries := make([]*extractor.MediaInfo, 0, len(courses))
+	for i, co := range courses {
+		extra := map[string]any{
+			"course_id": co.ID,
+			"source":    co.Source,
+			"platform":  platform,
+			"index":     i + 1,
+		}
+		if co.History {
+			extra["is_history"] = true
+		}
+		if co.Homework {
+			extra["is_homework"] = true
+		}
+		if co.Class {
+			extra["is_class"] = true
+		}
+		if co.Origin {
+			extra["is_origin"] = true
+		}
+		if co.Price != "" {
+			extra["price"] = co.Price
+		}
+		if co.Purchased {
+			extra["purchased"] = true
+		}
+		entries = append(entries, &extractor.MediaInfo{Site: "plaso", Title: clean(co.Title), Extra: extra})
+	}
+	return &extractor.MediaInfo{Site: "plaso", Title: "plaso_courses", Entries: entries, Extra: map[string]any{"platform": platform, "course_count": len(entries)}}
+}
+
+func (s *plasoSession) fetchFilesForCourse(kind, cid string) []fileItem {
+	switch kind {
+	case "history":
+		return s.fetchHistoryFiles(cid)
+	case "homework":
+		return s.fetchHomeworkFiles(cid)
+	default:
+		return s.fetchPackageFiles(cid)
+	}
 }
 
 func (s *plasoSession) fetchPackageFiles(cid string) []fileItem {
@@ -329,6 +418,7 @@ func (s *plasoSession) fetchPackageFiles(cid string) []fileItem {
 		{s.eps.url(packagePath), map[string]string{"packageId": cid, "id": cid, "fileGroupId": cid, "taskNum": "0"}},
 		{s.eps.url(infoPath), map[string]string{"fileGroupId": cid, "id": cid, "packageId": cid}},
 		{s.eps.url(dirInfoPath), map[string]string{"fileGroupId": cid, "id": cid, "dirId": cid, "hiddenTask": "false", "sourceWay": "course"}},
+		{s.eps.url(dirInfoPath), map[string]string{"id": cid, "xFileId": cid, "cid": cid, "hiddenTask": "1", "sourceWay": "course", "needMyFav": "1", "needProgress": "1"}},
 		{s.eps.url(filePath), map[string]string{"fileId": cid, "id": cid}},
 		{s.eps.url(fileInfoPath), map[string]string{"fileId": cid, "id": cid}},
 	}
@@ -341,6 +431,150 @@ func (s *plasoSession) fetchPackageFiles(cid string) []fileItem {
 		out = append(out, collectFileItems(v)...)
 	}
 	return s.expandFileDetails(dedupeFiles(out))
+}
+
+func (s *plasoSession) fetchHistoryFiles(cid string) []fileItem {
+	var out []fileItem
+	pageSize := 999
+	for start := 0; start < 20000; {
+		v, err := s.postJSON(s.eps.url(historyListPath), map[string]string{
+			"dateFrom": "0", "dateTo": "2000000000000", "indexStart": fmt.Sprint(start), "pageSize": fmt.Sprint(pageSize),
+		})
+		if err != nil {
+			break
+		}
+		items := s.historyItemsFromPayload(v)
+		if len(items) == 0 {
+			break
+		}
+		for _, f := range items {
+			if cid == "" || sameFileIdentity(f, cid) {
+				out = append(out, f)
+			}
+		}
+		if len(items) < pageSize {
+			break
+		}
+		start += len(items)
+	}
+	return s.expandFileDetails(dedupeFiles(out))
+}
+
+func (s *plasoSession) historyItemsFromPayload(v any) []fileItem {
+	var out []fileItem
+	for _, item := range extractNamedList(v, "list", "rows", "records") {
+		m := asAnyMap(item)
+		if len(m) == 0 {
+			continue
+		}
+		if f := normalizeHistoryFile(m); itemHasSignal(f) {
+			out = append(out, f)
+		} else {
+			out = append(out, collectFileItems(m)...)
+		}
+	}
+	if len(out) == 0 {
+		out = collectFileItems(v)
+	}
+	return dedupeFiles(out)
+}
+
+func normalizeHistoryFile(m map[string]any) fileItem {
+	fileCommon := asAnyMap(m["fileCommon"])
+	if recs := asAnyList(m["records"]); len(recs) > 0 {
+		rec := asAnyMap(recs[0])
+		if len(rec) > 0 {
+			if fc := asAnyMap(rec["fileCommon"]); len(fc) > 0 && firstText(fileCommon, "location") == "" {
+				fileCommon = fc
+			}
+		}
+	}
+	recordFile := map[string]any{}
+	if rfs := asAnyList(m["recordFiles"]); len(rfs) > 0 {
+		recordFile = asAnyMap(rfs[0])
+	}
+	merged := map[string]any{}
+	for k, v := range fileCommon {
+		merged[k] = v
+	}
+	for k, v := range recordFile {
+		if _, ok := merged[k]; !ok || valueText(merged[k]) == "" {
+			merged[k] = v
+		}
+	}
+	for k, v := range m {
+		if _, ok := merged[k]; !ok || valueText(merged[k]) == "" {
+			merged[k] = v
+		}
+	}
+	item := buildFileItem(merged)
+	item.ID = firstNonEmpty(firstText(m, "fileId", "file_id"), firstText(recordFile, "_id", "originId", "fileId"), firstText(fileCommon, "_id", "originId", "fileId"), item.ID)
+	item.MyID = firstNonEmpty(firstText(m, "myid", "myId"), firstText(fileCommon, "myid", "myId", "_id"), firstText(recordFile, "_id"), item.MyID)
+	item.Location = firstNonEmpty(firstText(recordFile, "location"), firstText(fileCommon, "location"), item.Location)
+	item.Name = firstNonEmpty(firstText(m, "title", "name"), item.Name)
+	item.Raw = m
+	return item
+}
+
+func (s *plasoSession) fetchHomeworkFiles(cid string) []fileItem {
+	var out []fileItem
+	v, err := s.postJSON(s.eps.url(homeworkListPath), map[string]string{"pageStart": "0", "pageSize": "999", "status": "5", "timeRange": "5"})
+	if err == nil {
+		for _, item := range extractNamedList(v, "zuoyes", "homeworks", "list", "rows") {
+			m := asAnyMap(item)
+			if len(m) == 0 {
+				continue
+			}
+			id := firstText(m, "homework_id", "homeworkId", "fileId", "id", "_id")
+			if cid != "" && !sameID(id, cid) {
+				continue
+			}
+			out = append(out, collectFileItems(m)...)
+			if id != "" {
+				if detail, ok := s.fetchFileDetail(fileItem{ID: id, MyID: id, Raw: m}); ok {
+					out = append(out, detail)
+				}
+				if fileList, ok := s.fetchFileIDList(id); ok {
+					out = append(out, fileList...)
+				}
+			}
+		}
+	}
+	if cid != "" && len(out) == 0 {
+		if detail, ok := s.fetchFileDetail(fileItem{ID: cid, MyID: cid}); ok {
+			out = append(out, detail)
+		}
+		if fileList, ok := s.fetchFileIDList(cid); ok {
+			out = append(out, fileList...)
+		}
+	}
+	return s.expandFileDetails(dedupeFiles(out))
+}
+
+func homeworkCoursesFromPayload(v any) []courseInfo {
+	var out []courseInfo
+	for _, item := range extractNamedList(v, "zuoyes", "homeworks", "list", "rows") {
+		m := asAnyMap(item)
+		if len(m) == 0 {
+			continue
+		}
+		id := firstText(m, "homework_id", "homeworkId", "fileId", "id", "_id")
+		title := firstText(m, "homework_name", "homeworkName", "title", "name")
+		if id == "" || title == "" {
+			continue
+		}
+		out = append(out, courseInfo{ID: "homework_" + strings.TrimPrefix(id, "homework_"), Title: prefixTitle("课后巩固_", title), Source: "homework", Homework: true, Purchased: true, Raw: m})
+	}
+	return out
+}
+
+func (s *plasoSession) fetchFileIDList(fileID string) ([]fileItem, bool) {
+	v, err := s.postJSON(s.eps.url(fileInfoPath), map[string]string{"fileId": fileID, "id": fileID})
+	if err != nil {
+		return nil, false
+	}
+	files := collectFileItems(v)
+	return files, len(files) > 0
 }
 
 func (s *plasoSession) fetchShareOrFile(id string) ([]fileItem, string) {
@@ -481,8 +715,11 @@ func (s *plasoSession) sourceMediaInfo(title string, f fileItem, src plasoSource
 		extra[k] = v
 	}
 	if src.M3U8Text != "" {
+		extra["m3u8_url"] = u
 		extra["m3u8_text"] = src.M3U8Text
 		extra["source_type"] = "m3u8_text"
+		u = m3u8DataURL(src.M3U8Text)
+		fmtv = "m3u8"
 	}
 	stream := extractor.Stream{
 		Quality:   firstNonEmpty(src.Quality, "best"),
@@ -495,6 +732,10 @@ func (s *plasoSession) sourceMediaInfo(title string, f fileItem, src plasoSource
 		Extra:     cloneAnyMap(extra),
 	}
 	return &extractor.MediaInfo{Site: "plaso", Title: title, Streams: map[string]extractor.Stream{"best": stream}, Extra: extra}
+}
+
+func m3u8DataURL(text string) string {
+	return "data:application/vnd.apple.mpegurl;base64," + base64.StdEncoding.EncodeToString([]byte(text))
 }
 
 func (s *plasoSession) postJSON(api string, data map[string]string) (any, error) {

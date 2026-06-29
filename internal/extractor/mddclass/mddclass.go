@@ -42,6 +42,8 @@ const (
 	mddclassTradeAPI          = "/trade/v1.1"
 	mddclassPCWebKey          = "pccembed"
 	mddclassCompanyDomain     = "lexue"
+	mddclassTenantID          = "10002"
+	mddclassFixedCoursePrice  = 999
 	mddclassPlaceholderMP4    = "51b106759c84acade91a81ef83cf2eea.mp4"
 	mddclassUserAgent         = "Mozilla/5.0 (Windows NT 6.2; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) QtWebEngine/5.15.2 Chrome/83.0.4103.122 Safari/537.36 CTPC/1.3.0.8/mddclass"
 	mddclassOCSUserAgent      = "Hujiang/OCS/PC/Qt/Win"
@@ -186,6 +188,8 @@ func (s *Mddclass) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 			"group_id":       course.GroupID,
 			"company_domain": sess.CompanyDomain,
 			"company_id":     sess.CompanyID,
+			"price":          mddclassFixedCoursePrice,
+			"purchased":      true,
 			"raw":            course.Raw,
 		},
 	}, nil
@@ -840,7 +844,7 @@ func mddclassDirectVideo(c *util.Client, sess *mddclassSession, target mddclassT
 
 func mddclassBuildVideoEntry(c *util.Client, sess *mddclassSession, video mddclassVideo, listOnly bool) (*extractor.MediaInfo, error) {
 	title := mddclassFirstText(video.Title, mddclassFormatVideoTitle(video.Index, video.RawTitle), video.VideoID)
-	extra := map[string]any{"video_id": video.VideoID, "series_id": video.SeriesID, "group_id": video.GroupID, "company_domain": mddclassFirstText(video.CompanyDomain, sess.CompanyDomain), "content_type": video.ContentType, "raw": video.Raw}
+	extra := map[string]any{"video_id": video.VideoID, "series_id": video.SeriesID, "group_id": video.GroupID, "company_domain": mddclassFirstText(video.CompanyDomain, sess.CompanyDomain), "content_type": video.ContentType, "price": mddclassFixedCoursePrice, "purchased": true, "raw": video.Raw}
 	if listOnly {
 		return &extractor.MediaInfo{Site: "mddclass", Title: title, Extra: extra}, nil
 	}
@@ -855,8 +859,17 @@ func mddclassBuildVideoEntry(c *util.Client, sess *mddclassSession, video mddcla
 	if mddclassIsPlaceholderURL(mediaURL) {
 		mediaURL = ""
 	}
+	var ocsStream extractor.Stream
+	var ocsExtra map[string]any
+	var hasOCSStream bool
 	if mediaURL == "" {
-		mediaURL = mddclassResolveOCSMediaURL(sess, detail, video.Raw, coursewareInfo)
+		ocsStream, ocsExtra, hasOCSStream = mddclassResolveOCSMedia(c, sess, video, coursewareInfo, detail, video.Raw, coursewareInfo)
+		if hasOCSStream {
+			if len(ocsStream.URLs) > 0 {
+				mediaURL = ocsStream.URLs[0]
+			}
+			extra["ocs"] = ocsExtra
+		}
 	}
 	if mediaURL == "" {
 		extra["detail"] = detail
@@ -879,21 +892,57 @@ func mddclassBuildVideoEntry(c *util.Client, sess *mddclassSession, video mddcla
 	streamHeaders := sess.mediaHeaders(video)
 	if mddclassIsOCSURL(mediaURL) {
 		streamHeaders = sess.ocsMediaHeaders(video, coursewareInfo)
+		mediaURL = mddclassSignOCSMediaURLWithHeaders(mediaURL, streamHeaders)
+	}
+	stream := extractor.Stream{
+		Quality:   "best",
+		URLs:      []string{mediaURL},
+		Format:    format,
+		Size:      video.Size,
+		NeedMerge: format == "m3u8",
+		Headers:   streamHeaders,
+	}
+	if hasOCSStream {
+		stream = ocsStream
+		if stream.Size == 0 {
+			stream.Size = video.Size
+		}
 	}
 	extra["detail"] = detail
 	extra["courseware_info"] = coursewareInfo
+	streams := map[string]extractor.Stream{"best": stream}
+	if material, ok := mddclassFindFileMaterial(detail, video.Raw, coursewareInfo); ok {
+		fileURL := material.URL
+		fileHeaders := sess.mediaHeaders(video)
+		if mddclassIsOCSURL(fileURL) {
+			fileHeaders = sess.ocsMediaHeaders(video, coursewareInfo)
+			fileURL = mddclassSignOCSMediaURLWithHeaders(fileURL, fileHeaders)
+		}
+		if fileURL != "" && fileURL != mediaURL {
+			streams["file"] = extractor.Stream{
+				Quality: "file",
+				URLs:    []string{fileURL},
+				Format:  material.Format,
+				Size:    material.Size,
+				Headers: fileHeaders,
+				Extra: map[string]any{
+					"title": material.Title,
+					"raw":   material.Raw,
+				},
+			}
+			extra["file"] = map[string]any{
+				"title":  material.Title,
+				"url":    fileURL,
+				"format": material.Format,
+				"size":   material.Size,
+			}
+		}
+	}
 	return &extractor.MediaInfo{
-		Site:  "mddclass",
-		Title: title,
-		Streams: map[string]extractor.Stream{"best": {
-			Quality:   "best",
-			URLs:      []string{mediaURL},
-			Format:    format,
-			Size:      video.Size,
-			NeedMerge: format == "m3u8",
-			Headers:   streamHeaders,
-		}},
-		Extra: extra,
+		Site:    "mddclass",
+		Title:   title,
+		Streams: streams,
+		Extra:   extra,
 	}, nil
 }
 

@@ -74,6 +74,9 @@ func mergeClassinAuthText(auth *classinAuth, raw string) {
 	if raw == "" {
 		return
 	}
+	if unescaped, err := url.QueryUnescape(raw); err == nil {
+		raw = strings.TrimSpace(unescaped)
+	}
 	if vals, err := url.ParseQuery(raw); err == nil && len(vals) > 0 {
 		if mergeClassinValues(auth, vals) {
 			return

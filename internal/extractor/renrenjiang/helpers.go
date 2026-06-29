@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/Sophomoresty/mediago/internal/extractor"
@@ -42,6 +44,15 @@ func parsePayload(s string) map[string]any {
 	var m map[string]any
 	if json.Unmarshal([]byte(s), &m) == nil {
 		return m
+	}
+	if vals, err := url.ParseQuery(s); err == nil && len(vals) > 0 {
+		out := map[string]any{}
+		for k, v := range vals {
+			if len(v) > 0 {
+				out[k] = v[0]
+			}
+		}
+		return out
 	}
 	return map[string]any{}
 }
@@ -110,10 +121,59 @@ func textAt(m map[string]any, keys ...string) string {
 	return ""
 }
 func numAt(m map[string]any, key string) float64 {
-	if v, ok := m[key].(float64); ok {
-		return v
+	return safeFloat(m[key])
+}
+func safeFloat(v any) float64 {
+	switch x := v.(type) {
+	case nil:
+		return 0
+	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return 0
+		}
+		return x
+	case float32:
+		return float64(x)
+	case int:
+		return float64(x)
+	case int64:
+		return float64(x)
+	case json.Number:
+		f, _ := x.Float64()
+		return f
+	case string:
+		s := strings.TrimSpace(x)
+		if s == "" {
+			return 0
+		}
+		f, _ := strconv.ParseFloat(s, 64)
+		return f
+	default:
+		f, _ := strconv.ParseFloat(strings.TrimSpace(fmt.Sprint(x)), 64)
+		return f
 	}
-	return 0
+}
+func truthy(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "1", "true", "yes", "ok", "paid", "pay", "subscribed":
+			return true
+		case "0", "false", "no", "fail", "null", "":
+			return false
+		}
+		return false
+	case float64:
+		return x != 0
+	case int:
+		return x != 0
+	case int64:
+		return x != 0
+	default:
+		return false
+	}
 }
 func findTextInAny(v any, key string) string {
 	switch t := v.(type) {

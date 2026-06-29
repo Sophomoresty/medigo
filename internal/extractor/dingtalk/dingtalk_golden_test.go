@@ -131,6 +131,32 @@ func TestMakeDingToken(t *testing.T) {
 	}
 }
 
+func TestPrepareDingTalkM3U8TextAddsDingToken(t *testing.T) {
+	content := `#EXTM3U
+#EXT-X-KEY:METHOD=AES-128,URI="key.key"
+#EXTINF:5,
+segment_001.ts
+`
+	got := prepareDingTalkM3U8Text(content, "https://cdn.example.com/live/abc/master.m3u8", "secret")
+	if !strings.Contains(got, `URI="https://cdn.example.com/live/abc/key.key"`) {
+		t.Fatalf("key URI not absolutized:\n%s", got)
+	}
+	if !strings.Contains(got, "https://cdn.example.com/live/abc/segment_001.ts?ding_token=") {
+		t.Fatalf("segment ding_token missing:\n%s", got)
+	}
+}
+
+func TestExtractDingtalkURLsFromText(t *testing.T) {
+	raw := `请看 https://n.dingtalk.com/dingding/live-room/index.html?roomId=1&liveUuid=2, 以及 https://shanji.dingtalk.com/app/transcribes/abc。`
+	got := extractDingtalkURLsFromText(raw)
+	if len(got) != 2 {
+		t.Fatalf("url count=%d, want 2: %#v", len(got), got)
+	}
+	if strings.HasSuffix(got[0], ",") || strings.HasSuffix(got[1], "。") || strings.HasSuffix(got[1], ".") {
+		t.Fatalf("punctuation not stripped: %#v", got)
+	}
+}
+
 func readGoldenFixture(t *testing.T) []byte {
 	t.Helper()
 	b, err := os.ReadFile("testdata/sample.json")

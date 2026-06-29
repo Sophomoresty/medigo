@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -247,6 +248,7 @@ func collectPlayables(c *util.Client, payload any, auth classinAuth) []playable 
 				out = append(out, collectPlayables(c, nested, auth)...)
 			}
 		}
+		out = append(out, transitionPlayables(c, node, title, auth)...)
 		for _, key := range []string{"pm3u8_path", "pm3u8", "Pm3u8", "m3u8", "M3u8", "Url", "url", "mp4_url", "path"} {
 			if p := playableFromString(c, textValue(node, key), title, auth); p.URL != "" {
 				out = append(out, p)
@@ -271,6 +273,151 @@ func playableFromString(c *util.Client, raw string, title string, auth classinAu
 		return playable{Title: title, URL: raw, Format: pickFormat(raw)}
 	}
 	return playable{}
+}
+
+func transitionPlayables(c *util.Client, node map[string]any, title string, auth classinAuth) []playable {
+	trans := transitionData(node)
+	output := anyMap(trans["output"])
+	if len(output) == 0 {
+		return nil
+	}
+	quality := pickClassinQualityKey(output)
+	selected := anyMap(output[quality])
+	if len(selected) == 0 {
+		return nil
+	}
+
+	basePath := firstNonEmpty(textValue(node, "transition_files"), textValue(node, "preview"))
+	pm3u8Path := joinClassinMediaPath(basePath, textValue(selected, "pm3u8", "Pm3u8", "m3u8", "M3u8"))
+	if pm3u8Path == "" {
+		pm3u8Path = extractPM3U8Path(firstNonEmpty(textValue(node, "Url", "url"), textValue(selected, "Url", "url")))
+	}
+	mp4URL := ""
+	if p := textValue(selected, "path"); p != "" {
+		mp4Base := strings.Replace(basePath, "files/pm3u8/cos/", "upload/trans/av01/", 1)
+		mp4URL = buildClassinCDNURL(mp4Base, p)
+	}
+	if mp4URL == "" {
+		mp4URL = buildClassinCDNURL("", firstNonEmpty(textValue(node, "Url", "url"), textValue(selected, "Url", "url")))
+	}
+
+	var out []playable
+	if pm3u8Path != "" {
+		if p := playableFromString(c, pm3u8Path, title, auth); p.URL != "" {
+			out = append(out, p)
+		}
+	}
+	if mp4URL != "" {
+		if p := playableFromString(c, mp4URL, title, auth); p.URL != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func transitionData(node map[string]any) map[string]any {
+	for _, key := range []string{"transData", "transition_data"} {
+		switch v := node[key].(type) {
+		case map[string]any:
+			return v
+		case string:
+			var out map[string]any
+			if err := json.Unmarshal([]byte(strings.TrimSpace(v)), &out); err == nil {
+				return out
+			}
+		}
+	}
+	return nil
+}
+
+func pickClassinQualityKey(output map[string]any) string {
+	var keys []string
+	for k := range output {
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.SliceStable(keys, func(i, j int) bool {
+		ri, rj := classinQualityRank(keys[i]), classinQualityRank(keys[j])
+		if ri != rj {
+			return ri > rj
+		}
+		return keys[i] > keys[j]
+	})
+	return keys[0]
+}
+
+func classinQualityRank(name string) int {
+	name = strings.ToUpper(strings.TrimSpace(name))
+	if m := regexp.MustCompile(`(\d{3,4})`).FindStringSubmatch(name); len(m) > 1 {
+		if n, err := strconv.Atoi(m[1]); err == nil {
+			return n
+		}
+	}
+	switch name {
+	case "4K":
+		return 2160
+	case "2K":
+		return 1440
+	case "FHD", "SHD":
+		return 1080
+	case "HD":
+		return 720
+	case "SD":
+		return 480
+	case "LD":
+		return 360
+	default:
+		return 0
+	}
+}
+
+func joinClassinMediaPath(basePath, mediaPath string) string {
+	basePath = strings.TrimSpace(basePath)
+	mediaPath = strings.TrimSpace(mediaPath)
+	if mediaPath == "" {
+		return ""
+	}
+	if strings.HasPrefix(mediaPath, "http") || strings.HasPrefix(mediaPath, "files/") {
+		return mediaPath
+	}
+	if basePath == "" {
+		if strings.Contains(mediaPath, "/") {
+			return strings.TrimLeft(mediaPath, "/")
+		}
+		return ""
+	}
+	if strings.HasPrefix(basePath, "http") {
+		base, err := url.Parse(ensureTrailingSlash(basePath))
+		if err != nil {
+			return strings.TrimRight(basePath, "/") + "/" + strings.TrimLeft(mediaPath, "/")
+		}
+		ref, err := url.Parse(strings.TrimLeft(mediaPath, "/"))
+		if err != nil {
+			return strings.TrimRight(basePath, "/") + "/" + strings.TrimLeft(mediaPath, "/")
+		}
+		return base.ResolveReference(ref).String()
+	}
+	return strings.TrimRight(basePath, "/") + "/" + strings.TrimLeft(mediaPath, "/")
+}
+
+func buildClassinCDNURL(basePath, mediaPath string) string {
+	joined := joinClassinMediaPath(basePath, mediaPath)
+	if joined == "" {
+		return ""
+	}
+	if strings.HasPrefix(joined, "http") {
+		return joined
+	}
+	return "https://t0s-cdn.eeo.cn/" + strings.TrimLeft(joined, "/")
+}
+
+func ensureTrailingSlash(s string) string {
+	if strings.HasSuffix(s, "/") {
+		return s
+	}
+	return s + "/"
 }
 
 func classinSignHeaders(data map[string]string, contentType string, auth classinAuth) map[string]string {
@@ -525,6 +672,13 @@ func textValue(m map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func anyMap(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok {
+		return m
+	}
+	return nil
 }
 
 func referer(raw string) string {

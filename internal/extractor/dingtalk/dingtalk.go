@@ -51,6 +51,30 @@ func (d *DingTalk) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 		return nil, fmt.Errorf("dingtalk requires login cookies (use --cookies or --cookies-from-browser)")
 	}
 
+	if urls := extractDingtalkURLsFromText(rawURL); len(urls) > 0 {
+		if len(urls) == 1 {
+			rawURL = urls[0]
+		} else {
+			entries := make([]*extractor.MediaInfo, 0, len(urls))
+			for _, u := range urls {
+				entry, err := d.Extract(u, opts)
+				if err != nil {
+					continue
+				}
+				entries = append(entries, entry)
+			}
+			if len(entries) == 0 {
+				return nil, fmt.Errorf("dingtalk batch text contains URLs but none resolved")
+			}
+			return &extractor.MediaInfo{
+				Site:    "dingtalk",
+				Title:   "dingtalk_batch",
+				Entries: entries,
+				Extra:   map[string]any{"url_count": len(urls), "charge_beans": dingtalkChargeBeans(len(entries))},
+			}, nil
+		}
+	}
+
 	// Alidocs notable/record links contain sheet row metadata and may embed
 	// media directly in document payloads or via CSpace file metas.
 	if meta := extractNotableRecordMeta(rawURL); meta.Valid() {
@@ -138,16 +162,26 @@ func buildMediaInfo(result *liveReplayResult) (*extractor.MediaInfo, error) {
 	if strings.Contains(strings.ToLower(bestURL), ".m3u8") {
 		format = "m3u8"
 	}
+	streamURLs := append([]string(nil), result.PlaybackURLs...)
+	streamExtra := map[string]any{}
+	if result.M3U8Content != "" {
+		streamURLs = []string{dingtalkM3U8DataURL(result.M3U8Content)}
+		format = "m3u8"
+		streamExtra["source_urls"] = append([]string(nil), result.PlaybackURLs...)
+		streamExtra["source_type"] = "m3u8_text"
+	}
 
 	streams := map[string]extractor.Stream{
 		"default": {
-			Quality: "best",
-			URLs:    result.PlaybackURLs,
-			Format:  format,
+			Quality:   "best",
+			URLs:      streamURLs,
+			Format:    format,
+			NeedMerge: format == "m3u8",
 			Headers: map[string]string{
 				"Referer":    referer,
 				"User-Agent": pcUA,
 			},
+			Extra: streamExtra,
 		},
 	}
 
@@ -155,10 +189,15 @@ func buildMediaInfo(result *liveReplayResult) (*extractor.MediaInfo, error) {
 	extra := map[string]any{}
 	if result.M3U8Content != "" {
 		extra["m3u8_content"] = result.M3U8Content
+		extra["m3u8_text"] = result.M3U8Content
 	}
 	if result.PlaybackToken != "" {
 		extra["playback_token"] = result.PlaybackToken
 	}
+	if types := dingtalkSourceTypes(append(streamURLs, result.PlaybackURLs...)); len(types) > 0 {
+		extra["source_types"] = types
+	}
+	extra["charge_beans"] = dingtalkChargeBeans(1)
 	for k, v := range result.Extra {
 		extra[k] = v
 	}

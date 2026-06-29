@@ -3,7 +3,6 @@ package yixiaoerguo
 
 import (
 	"crypto/md5"
-	crand "crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/Sophomoresty/mediago/internal/extractor"
 	"github.com/Sophomoresty/mediago/internal/util"
@@ -64,6 +65,14 @@ type yxContext struct {
 	headers map[string]string
 }
 
+type yxCourse struct {
+	ID        string
+	Title     string
+	Price     float64
+	Purchased bool
+	Raw       map[string]any
+}
+
 type yxVideo struct {
 	SectionID string
 	Type      string
@@ -77,13 +86,9 @@ func (y *Yixiaoerguo) Extract(rawURL string, opts *extractor.ExtractOpts) (*extr
 	if opts == nil || opts.Cookies == nil {
 		return nil, fmt.Errorf("yixiaoerguo requires login cookies")
 	}
-	cid := parseCID(rawURL)
-	if cid == "" {
-		return nil, fmt.Errorf("yixiaoerguo: cannot parse 24-hex course id from URL")
-	}
 	c := util.NewClient()
 	c.SetCookieJar(opts.Cookies)
-	ctx := &yxContext{c: c, token: tokenFromJar(opts.Cookies), cid: cid}
+	ctx := &yxContext{c: c, token: tokenFromJar(opts.Cookies)}
 	if ctx.token == "" {
 		return nil, fmt.Errorf("yixiaoerguo: sc_token_pro token is required")
 	}
@@ -91,8 +96,56 @@ func (y *Yixiaoerguo) Extract(rawURL string, opts *extractor.ExtractOpts) (*extr
 	if err := ctx.checkCookie(); err != nil {
 		return nil, err
 	}
-	title := ctx.courseTitle()
-	payload, err := ctx.chaptersPayload()
+
+	cid := parseCID(rawURL)
+	if cid == "" {
+		return ctx.extractCourseList()
+	}
+	ctx.cid = cid
+	return ctx.extractCourse(yxCourse{ID: cid})
+}
+
+func (x *yxContext) extractCourseList() (*extractor.MediaInfo, error) {
+	courses, err := x.courseList(false)
+	if err != nil {
+		return nil, err
+	}
+	if len(courses) == 0 {
+		return nil, fmt.Errorf("yixiaoerguo: course list is empty")
+	}
+	entries := make([]*extractor.MediaInfo, 0, len(courses))
+	var firstErr error
+	for _, course := range courses {
+		child := *x
+		child.cid = course.ID
+		info, err := child.extractCourse(course)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		entries = append(entries, info)
+	}
+	if len(entries) == 0 {
+		if firstErr != nil {
+			return nil, fmt.Errorf("yixiaoerguo: no playable listed courses: %w", firstErr)
+		}
+		return nil, fmt.Errorf("yixiaoerguo: no playable listed courses")
+	}
+	return &extractor.MediaInfo{
+		Site:    "yixiaoerguo",
+		Title:   "一笑而过课程列表",
+		Entries: entries,
+		Extra: map[string]any{
+			"course_count": len(courses),
+		},
+	}, nil
+}
+
+func (x *yxContext) extractCourse(seed yxCourse) (*extractor.MediaInfo, error) {
+	meta := x.courseMeta(seed)
+	payload, err := x.chaptersPayload()
 	if err != nil {
 		return nil, err
 	}
@@ -102,17 +155,178 @@ func (y *Yixiaoerguo) Extract(rawURL string, opts *extractor.ExtractOpts) (*extr
 	}
 	entries := make([]*extractor.MediaInfo, 0, len(videos))
 	for _, v := range videos {
-		if entry := ctx.resolveEntry(v); entry != nil {
+		if entry := x.resolveEntry(v); entry != nil {
 			entries = append(entries, entry)
 		}
 	}
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("yixiaoerguo: no qianxuecloud media resolved")
 	}
+	title := meta.Title
 	if title == "" {
-		title = "yixiaoerguo_" + cid
+		title = "yixiaoerguo_" + x.cid
 	}
-	return &extractor.MediaInfo{Site: "yixiaoerguo", Title: cleanTitle(title), Entries: entries}, nil
+	return &extractor.MediaInfo{
+		Site:    "yixiaoerguo",
+		Title:   cleanTitle(title),
+		Entries: entries,
+		Extra: map[string]any{
+			"course_id": x.cid,
+			"price":     meta.Price,
+			"purchased": meta.Purchased,
+		},
+	}, nil
+}
+
+func (x *yxContext) courseList(force bool) ([]yxCourse, error) {
+	_ = force // the Go extractor builds a fresh list per Extract call.
+	seen := map[string]bool{}
+	courses := make([]yxCourse, 0)
+	for _, free := range []bool{false, true} {
+		lastFingerprint := ""
+		collectedForFlag := 0
+		for page := 1; page <= 200; page++ {
+			resp, err := x.requestAPI(courseListPath, "GET", map[string]string{
+				"free":       strings.ToLower(fmt.Sprint(free)),
+				"countTotal": "1",
+				"pageSize":   "20",
+				"page":       fmt.Sprint(page),
+				"current":    fmt.Sprint(page),
+			}, nil)
+			if err != nil {
+				if page == 1 && len(courses) == 0 {
+					return nil, err
+				}
+				break
+			}
+			pageCourses := extractCourseListFromPayload(resp, true)
+			fingerprint := courseListFingerprint(pageCourses)
+			if fingerprint != "" && fingerprint == lastFingerprint {
+				break
+			}
+			lastFingerprint = fingerprint
+			for _, course := range pageCourses {
+				if course.ID == "" || seen[course.ID] {
+					continue
+				}
+				seen[course.ID] = true
+				courses = append(courses, course)
+				collectedForFlag++
+			}
+			data, pagination := coursePageData(resp)
+			total := positiveInt(firstNonNil(pagination["total"], data["total"], data["totalCount"], data["count"]), 0)
+			pages := positiveInt(firstNonNil(pagination["pages"], data["pages"], data["totalPage"], data["totalPages"]), 0)
+			if boolValue(firstNonNil(data["end"], data["last"], data["isLast"], pagination["end"], pagination["last"], pagination["isLast"])) {
+				break
+			}
+			if total > 0 && collectedForFlag >= total {
+				break
+			}
+			if pages > 0 && page >= pages {
+				break
+			}
+			if v, ok := firstNonNil(data["hasNext"], pagination["hasNext"]).(bool); ok && !v {
+				break
+			}
+			if len(pageCourses) == 0 {
+				break
+			}
+		}
+	}
+	return courses, nil
+}
+
+func extractCourseListFromPayload(resp map[string]any, purchased bool) []yxCourse {
+	data := resp["data"]
+	items := listFromCoursePayload(data)
+	out := make([]yxCourse, 0, len(items))
+	for _, item := range items {
+		id := firstString(item, "id", "courseId", "course_id")
+		title := firstString(item, "name", "title", "courseName")
+		if id == "" {
+			continue
+		}
+		price := normalizeYXPrice(firstNonNil(item["sellingPrice"], item["originPrice"], item["price"]))
+		out = append(out, yxCourse{
+			ID:        id,
+			Title:     firstNonEmpty(title, id),
+			Price:     price,
+			Purchased: purchased || boolValue(item["exists"]),
+			Raw:       item,
+		})
+	}
+	return out
+}
+
+func listFromCoursePayload(data any) []map[string]any {
+	if arr, ok := data.([]any); ok {
+		out := make([]map[string]any, 0, len(arr))
+		for _, item := range arr {
+			if m := asMap(item); len(m) > 0 {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+	m := asMap(data)
+	for _, key := range []string{"list", "records", "items", "rows", "content", "courseList", "courses"} {
+		if out := listFromCoursePayload(m[key]); len(out) > 0 {
+			return out
+		}
+	}
+	return nil
+}
+
+func coursePageData(resp map[string]any) (map[string]any, map[string]any) {
+	data := asMap(resp["data"])
+	return data, asMap(data["pagination"])
+}
+
+func courseListFingerprint(courses []yxCourse) string {
+	if len(courses) == 0 {
+		return ""
+	}
+	ids := make([]string, 0, len(courses))
+	for _, course := range courses {
+		ids = append(ids, course.ID)
+	}
+	return strings.Join(ids, "\x00")
+}
+
+func mergeCourseMeta(seed yxCourse, data map[string]any, detailPurchased bool) yxCourse {
+	if len(data) == 0 {
+		return seed
+	}
+	seed.Title = firstNonEmpty(seed.Title, firstString(data, "name", "title", "courseName"))
+	if p := normalizeYXPrice(firstNonNil(data["sellingPrice"], data["originPrice"], data["estimatePrice"], data["price"])); p > 0 || seed.Price == 0 {
+		seed.Price = p
+	}
+	if payInfo := asMap(data["payInfo"]); len(payInfo) > 0 {
+		sellStateName := firstString(payInfo, "sellStateName")
+		if strings.Contains(sellStateName, "已购买") || firstString(payInfo, "sellState") == "8" {
+			seed.Purchased = true
+		}
+	}
+	if detailPurchased {
+		seed.Purchased = true
+	}
+	if seed.Price == 0 {
+		if v, ok := data["displayPurchase"].(bool); ok && !v {
+			seed.Purchased = true
+		}
+	}
+	if seed.Raw == nil {
+		seed.Raw = data
+	}
+	return seed
+}
+
+func positiveInt(v any, fallback int) int {
+	n := int(floatValue(v))
+	if n > 0 {
+		return n
+	}
+	return fallback
 }
 
 func parseCID(raw string) string {
@@ -173,13 +387,11 @@ func (x *yxContext) apiHeaders(path string) map[string]string {
 }
 
 func xscNonce() string {
-	var b [16]byte
-	if _, err := crand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+	id, err := uuid.NewUUID()
+	if err == nil {
+		return id.String()
 	}
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+	return uuid.NewString()
 }
 
 func (x *yxContext) checkCookie() error {
@@ -193,18 +405,19 @@ func (x *yxContext) checkCookie() error {
 	return nil
 }
 
-func (x *yxContext) courseTitle() string {
+func (x *yxContext) courseMeta(seed yxCourse) yxCourse {
+	if seed.ID == "" {
+		seed.ID = x.cid
+	}
 	resp, err := x.requestAPI(fmt.Sprintf(courseDetailPathFmt, x.cid), "GET", nil, nil)
 	if err == nil {
-		if t := firstString(asMap(resp["data"]), "name", "title", "courseName"); t != "" {
-			return t
-		}
+		seed = mergeCourseMeta(seed, asMap(resp["data"]), true)
 	}
 	resp, err = x.requestAPI(fmt.Sprintf(courseProductPathFmt, x.cid), "GET", nil, nil)
 	if err != nil {
-		return ""
+		return seed
 	}
-	return firstString(asMap(resp["data"]), "name", "title", "courseName")
+	return mergeCourseMeta(seed, asMap(resp["data"]), false)
 }
 
 func (x *yxContext) chaptersPayload() (map[string]any, error) {
@@ -286,7 +499,13 @@ func collectVideos(payload map[string]any) []yxVideo {
 		if id == "" {
 			return
 		}
-		out = append(out, yxVideo{SectionID: id, Type: firstString(m, "type", "sectionType"), State: firstString(m, "state"), Title: cleanTitle(fmt.Sprintf("[%s]--%s", joinIdx(idx), firstNonEmpty(name, id))), Duration: firstString(m, "duration", "expected_duration"), CanTry: boolValue(firstNonNil(m["can_try"], m["canTry"]))})
+		expectedDuration := firstString(m, "duration", "expected_duration")
+		if expectedDuration == "" {
+			if duration := durationFromPayload(m); duration > 0 {
+				expectedDuration = fmt.Sprint(duration)
+			}
+		}
+		out = append(out, yxVideo{SectionID: id, Type: firstString(m, "type", "sectionType"), State: firstString(m, "state"), Title: cleanTitle(fmt.Sprintf("[%s]--%s", joinIdx(idx), firstNonEmpty(name, id))), Duration: expectedDuration, CanTry: boolValue(firstNonNil(m["can_try"], m["canTry"]))})
 	}
 	walk(chapters, nil, nil)
 	return out

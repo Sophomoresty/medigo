@@ -185,13 +185,16 @@ func videoMediaURL(c *util.Client, jar http.CookieJar, ctx xetCtx, vid string) (
 		}
 		return u, extra
 	}
+	if u := decodeXETVideoURLField(root["data"]); u != "" {
+		return u, map[string]any{"api": api, "decoded_video_urls": true}
+	}
 	if s := deepText(root, "video_urls", "play_urls", "url"); s != "" {
 		if u := firstURLInString(s); u != "" {
 			return u, map[string]any{"api": api}
 		}
 	}
 	if ps := deepText(root, "play_sign", "playSign"); ps != "" && ctx.appID != "" {
-		if u := postDetailURL(c, jar, ctx, vid, videoPlayURL, "", map[string]string{"play_sign": ps}); u != "" {
+		if u := postDetailURL(c, jar, ctx, vid, videoPlayURL, "", map[string]string{"opr_sys": "Win32", "play_sign": ps}); u != "" {
 			return u, map[string]any{"api": videoPlayURL}
 		}
 	}
@@ -251,16 +254,21 @@ func decryptLookbackPrivateURL(raw string) string {
 // endpoint with the user ID string to derive the actual AES key.
 //
 // From Xiaoetech_Config.get_xiaoetech_key_func: each byte of key_bytes is
-// XORed with the corresponding byte of the user ID (cycling). If the result
-// is not 16, 24, or 32 bytes, it is truncated to 16.
+// XORed with the corresponding byte of the user ID via Python zip(), i.e. it
+// stops at the shorter input. If the result is not 16, 24, or 32 bytes, it is
+// truncated to 16.
 func decryptLookbackKey(keyBytes []byte, userID string) []byte {
 	if userID == "" || len(keyBytes) == 0 {
 		return keyBytes
 	}
 	uid := []byte(userID)
-	result := make([]byte, len(keyBytes))
-	for i, b := range keyBytes {
-		result[i] = b ^ uid[i%len(uid)]
+	n := len(keyBytes)
+	if len(uid) < n {
+		n = len(uid)
+	}
+	result := make([]byte, n)
+	for i := 0; i < n; i++ {
+		result[i] = keyBytes[i] ^ uid[i]
 	}
 	switch len(result) {
 	case 16, 24, 32:

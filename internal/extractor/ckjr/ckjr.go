@@ -84,12 +84,14 @@ func (s *Ckjr) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.M
 	}
 	c := util.NewClient()
 	c.SetCookieJar(opts.Cookies)
+	route := parseRoute(rawURL)
 	headers := ckjrHeaders(rawURL)
 	if cookie := ckjrCookieHeader(opts.Cookies, rawURL); cookie != "" {
 		headers["Cookie"] = cookie
 	}
+	auth := ckjrAuthFromCookies(opts.Cookies, rawURL, route)
+	ckjrApplyAuth(headers, &route, auth)
 
-	route := parseRoute(rawURL)
 	if err := checkLogin(c, headers); err != nil {
 		return nil, err
 	}
@@ -132,7 +134,7 @@ func checkLogin(c *util.Client, headers map[string]string) error {
 	if err != nil {
 		return fmt.Errorf("ckjr login check: %w", err)
 	}
-	if !apiResponseOK(payload) {
+	if !apiLoginResponseOK(payload) {
 		msg := firstNonEmpty(textValue(asMap(payload), "msg", "message", "error"), "login check failed")
 		return fmt.Errorf("ckjr login check failed: %s", msg)
 	}

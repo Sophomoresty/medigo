@@ -20,6 +20,7 @@ const (
 	login_url          = origin + "/site/login"
 	api_base           = origin + "/admin-api"
 	token_key          = "eneteduToken"
+	user_agent         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 	detail_path        = "/course/broadcast/glanceAndGet"
 	task_tree_path     = "/course/broadcast/task/homeView"
 	task_node_path     = "/course/broadcast/task/node/get"
@@ -64,6 +65,9 @@ func (s *Enetedu) Extract(rawURL string, opts *extractor.ExtractOpts) (*extracto
 	c := util.NewClient()
 	c.SetCookieJar(opts.Cookies)
 	headers := requestHeaders(opts.Cookies, rawURL)
+	if err := validateLogin(c, headers); err != nil {
+		return nil, err
+	}
 
 	detail, err := requestJSON(c, detail_path, map[string]string{"id": detailID}, nil, "GET", headers)
 	if err != nil {
@@ -244,9 +248,10 @@ func parseID(raw string) string {
 
 func requestHeaders(jar http.CookieJar, raw string) map[string]string {
 	headers := map[string]string{
-		"Accept":  "application/json, text/plain, */*",
-		"Referer": firstNonEmpty(raw, referer),
-		"Origin":  origin,
+		"Accept":     "application/json, text/plain, */*",
+		"Referer":    firstNonEmpty(raw, referer),
+		"Origin":     origin,
+		"User-Agent": user_agent,
 	}
 	cookieParts := []string{}
 	seenCookies := map[string]bool{}
@@ -262,6 +267,7 @@ func requestHeaders(jar http.CookieJar, raw string) map[string]string {
 				headers[token_key] = cookie.Value
 				headers["Authorization"] = cookie.Value
 			}
+			mergeLoginPayloadHeaders(headers, cookie.Value)
 		}
 	}
 	if len(cookieParts) > 0 {
@@ -270,4 +276,101 @@ func requestHeaders(jar http.CookieJar, raw string) map[string]string {
 		headers["cookie"] = cookieHeader
 	}
 	return headers
+}
+
+func mergeLoginPayloadHeaders(headers map[string]string, raw string) {
+	payload := normalizeLoginPayload(raw)
+	if len(payload) == 0 {
+		return
+	}
+	storage := storageDict(payload)
+	token := firstNonEmpty(valueString(payload, token_key, "token"), valueString(storage, token_key, "token"))
+	if token != "" {
+		headers[token_key] = token
+		headers["Authorization"] = token
+	}
+	if cookieText := firstNonEmpty(valueString(payload, "cookie", "cookieValue", "cookie_string"), cookiesString(payload)); cookieText != "" {
+		headers["Cookie"] = cookieText
+		headers["cookie"] = cookieText
+	}
+}
+
+func normalizeLoginPayload(raw string) map[string]any {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if unescaped, err := url.QueryUnescape(raw); err == nil {
+		raw = strings.TrimSpace(unescaped)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err == nil {
+		return payload
+	}
+	if vals, err := url.ParseQuery(raw); err == nil && len(vals) > 0 {
+		payload = map[string]any{}
+		for k, v := range vals {
+			if len(v) > 0 {
+				payload[k] = v[0]
+			}
+		}
+		return payload
+	}
+	return nil
+}
+
+func storageDict(payload map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, key := range []string{"localStorage", "local_storage", "sessionStorage", "session_storage", "storage"} {
+		if m, ok := payload[key].(map[string]any); ok {
+			for k, v := range m {
+				out[k] = v
+			}
+		}
+	}
+	return out
+}
+
+func cookiesString(payload map[string]any) string {
+	if items, ok := payload["cookies"].([]any); ok {
+		parts := make([]string, 0, len(items))
+		for _, item := range items {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			name := valueString(m, "name")
+			value := valueString(m, "value")
+			if name != "" && value != "" {
+				parts = append(parts, name+"="+value)
+			}
+		}
+		return strings.Join(parts, "; ")
+	}
+	if m, ok := payload["cookies"].(map[string]any); ok {
+		parts := make([]string, 0, len(m))
+		for k, v := range m {
+			value := strings.TrimSpace(fmt.Sprint(v))
+			if k != "" && value != "" && value != "<nil>" {
+				parts = append(parts, k+"="+value)
+			}
+		}
+		return strings.Join(parts, "; ")
+	}
+	return ""
+}
+
+func validateLogin(c *util.Client, headers map[string]string) error {
+	if firstNonEmpty(headers[token_key], headers["Authorization"]) == "" {
+		return fmt.Errorf("enetedu requires %s token", token_key)
+	}
+	payload, err := requestJSON(c, "/site/user/baseinfo", nil, nil, "GET", headers)
+	if err != nil {
+		return fmt.Errorf("enetedu login check: %w", err)
+	}
+	data := dataOfAny(payload)
+	if valueString(data, "id", "userId", "name", "nickname") == "" {
+		return fmt.Errorf("enetedu login check returned no user")
+	}
+	return nil
 }

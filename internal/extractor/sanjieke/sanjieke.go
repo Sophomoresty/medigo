@@ -47,7 +47,11 @@ type Sanjieke struct{}
 
 func (s *Sanjieke) Patterns() []string { return patterns }
 
-type courseKey struct{ classID, courseID, projectID string }
+type courseKey struct {
+	classID, courseID, projectID, productID, title string
+	price                                          float64
+	purchased                                      bool
+}
 
 type courseListResp struct {
 	Code int `json:"code"`
@@ -59,12 +63,21 @@ type courseListResp struct {
 }
 
 type courseItem struct {
-	ClassID     any    `json:"class_id"`
-	CourseID    any    `json:"course_id"`
-	StudyCourse any    `json:"study_course_id"`
-	ProjectID   any    `json:"project_id"`
-	ProjectID2  any    `json:"projectId"`
-	StudyingURL string `json:"studying_url"`
+	ClassID      any    `json:"class_id"`
+	CourseID     any    `json:"course_id"`
+	StudyCourse  any    `json:"study_course_id"`
+	ProjectID    any    `json:"project_id"`
+	ProjectID2   any    `json:"projectId"`
+	ProductID    any    `json:"product_id"`
+	ProductID2   any    `json:"productId"`
+	Title        string `json:"title"`
+	Name         string `json:"name"`
+	Subtitle     string `json:"subtitle"`
+	Price        any    `json:"price"`
+	CoursePrice  any    `json:"course_price"`
+	OriginPrice  any    `json:"origin_price"`
+	CurrentPrice any    `json:"current_price"`
+	StudyingURL  string `json:"studying_url"`
 }
 
 type infoResp struct {
@@ -119,10 +132,21 @@ func (s *Sanjieke) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 	key := parseCourseKey(rawURL)
 	c := util.NewClient()
 	c.SetCookieJar(opts.Cookies)
+	loginChecked := false
+	if hasSJKCookie(opts.Cookies) {
+		if !checkSJKLogin(c, opts.Cookies) {
+			return nil, fmt.Errorf("sanjieke: cookie validation failed; login required")
+		}
+		loginChecked = true
+	}
 	if key.courseID == "" {
 		found, err := fetchCourseList(c, opts.Cookies, key)
 		if err == nil {
 			key = found
+		}
+	} else if hasSJKCookie(opts.Cookies) {
+		if found, err := fetchCourseList(c, opts.Cookies, key); err == nil {
+			key = mergeCourseKey(key, found)
 		}
 	}
 	if key.courseID == "" {
@@ -133,12 +157,15 @@ func (s *Sanjieke) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 	}
 
 	h := studyHeaders(opts.Cookies, fmt.Sprintf(urlStudyPage, key.projectID, key.courseID))
-	title := "sanjieke_" + key.courseID
+	title := firstNonEmpty(key.title, "sanjieke_"+key.courseID)
 	if body, err := c.GetString(fmt.Sprintf(urlStudyInfo, key.projectID, key.courseID), h); err == nil {
 		var info infoResp
 		if json.Unmarshal([]byte(body), &info) == nil && info.Code == 200 {
 			title = firstNonEmpty(info.Data.Title, info.Data.Name, title)
 		}
+	}
+	if key.price == 0 && key.productID != "" {
+		key.price = fetchPublicProductPrice(c, key.productID)
 	}
 	body, err := c.GetString(fmt.Sprintf(urlTree, key.projectID, key.courseID), h)
 	if err != nil {
@@ -158,7 +185,16 @@ func (s *Sanjieke) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("sanjieke: no playable video or file nodes in course tree")
 	}
-	return &extractor.MediaInfo{Site: "sanjieke", Title: title, Entries: entries}, nil
+	extra := compactSJKExtra(map[string]any{
+		"class_id":      key.classID,
+		"course_id":     key.courseID,
+		"project_id":    key.projectID,
+		"product_id":    key.productID,
+		"price":         key.price,
+		"purchased":     key.purchased,
+		"login_checked": loginChecked,
+	})
+	return &extractor.MediaInfo{Site: "sanjieke", Title: title, Entries: entries, Extra: extra}, nil
 }
 
 func fetchCourseList(c *util.Client, jar http.CookieJar, want courseKey) (courseKey, error) {
@@ -178,11 +214,11 @@ func fetchCourseList(c *util.Client, jar http.CookieJar, want courseKey) (course
 			return courseKey{}, fmt.Errorf("course list code=%d", resp.Code)
 		}
 		for _, item := range resp.Data.List {
-			classID := anyString(item.ClassID)
-			courseID := firstNonEmpty(anyString(item.CourseID), anyString(item.StudyCourse))
-			projectID := firstNonEmpty(anyString(item.ProjectID), anyString(item.ProjectID2), extractProjectID(item.StudyingURL), "0")
+			normalized := normalizeCourseItem(item)
+			classID := normalized.classID
+			courseID := normalized.courseID
 			if courseID != "" && first.courseID == "" {
-				first = courseKey{classID: classID, courseID: courseID, projectID: projectID}
+				first = normalized
 			}
 			if want.classID != "" && classID != want.classID {
 				continue
@@ -191,7 +227,7 @@ func fetchCourseList(c *util.Client, jar http.CookieJar, want courseKey) (course
 				continue
 			}
 			if courseID != "" {
-				return courseKey{classID: classID, courseID: courseID, projectID: projectID}, nil
+				return normalized, nil
 			}
 		}
 		if resp.Data.IsLastPage || len(resp.Data.List) < limit || page >= toInt(resp.Data.LastPage, 200) {

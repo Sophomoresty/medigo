@@ -46,6 +46,30 @@ func TestExtractMock(t *testing.T) {
 	}
 }
 
+func TestParseCourseURLCustomBjyxDomain(t *testing.T) {
+	cu, ok := parseCourseURL("https://huayan.fashuoschool.com/course/476?type=bjyx")
+	if !ok {
+		t.Fatal("expected custom bjyx course URL to be accepted")
+	}
+	if cu.domain != "huayan.fashuoschool.com" || cu.cid != "476" {
+		t.Fatalf("courseURL = %#v", cu)
+	}
+	if _, ok := parseCourseURL("https://example.com/course/476"); ok {
+		t.Fatal("generic non-bjyx course URL should remain rejected")
+	}
+}
+
+func TestBaijiayunxiaoM3U8RequiresMerge(t *testing.T) {
+	info := mediaInfo("baijiayunxiao", "lesson", "https://cdn.example.com/a.m3u8", "m3u8", nil)
+	stream, ok := info.Streams["best"]
+	if !ok {
+		t.Fatal("missing best stream")
+	}
+	if !stream.NeedMerge {
+		t.Fatal("m3u8 stream should require merge")
+	}
+}
+
 func TestYunduanEntryCoursePlayback(t *testing.T) {
 	counts := map[string]int{}
 	handler := yunduanMockHandler(t, counts, false)

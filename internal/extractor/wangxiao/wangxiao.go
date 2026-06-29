@@ -47,7 +47,18 @@ func (w *Wangxiao) Patterns() []string { return patterns }
 
 type lessonRef struct {
 	Title, URL, ActivityID, ProductID, SiteID, VideoID string
+	FileURL, FileHTML, FileFmt, FileName               string
 	Legacy                                             bool
+}
+
+type wangxiaoCourse struct {
+	Title       string
+	ProductID   string
+	OrderNumber string
+	ItemNum     string
+	ItemURL     string
+	ActivityID  string
+	ContinueURL string
 }
 
 var (
@@ -82,7 +93,17 @@ func (w *Wangxiao) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 		return nil, fmt.Errorf("wangxiao requires valid NewPlatFormToken/token cookies")
 	}
 
-	productID := firstNonEmpty(firstGroup(productRe, seed), firstGroup(productRe, page))
+	if opts.ListOnly || isUserCourseURL(seed) {
+		courses := parseCourseListPage(page)
+		if len(courses) == 0 && !isUserCourseURL(seed) {
+			courses, _ = fetchCourseList(c, headers)
+		}
+		return buildCourseListMedia(courses), nil
+	}
+
+	itemNum := firstNonEmpty(firstGroup(itemRe, seed), firstGroup(itemRe, page))
+	meta := extractWangxiaoPageMeta(page)
+	productID := firstNonEmpty(firstGroup(productRe, seed), firstGroup(productRe, page), stringFromMap(meta, "product_id"))
 	refs := parseLessonRefs(page, seed, productID)
 	if len(refs) == 0 {
 		refs = []lessonRef{{Title: extractTitle(page), URL: seed, ActivityID: firstGroup(activityRe, seed), ProductID: productID, SiteID: extractSiteID(page), VideoID: extractVideoID(page), Legacy: strings.Contains(strings.ToLower(seed), "users.wangxiao.cn/player")}}
@@ -120,7 +141,22 @@ func (w *Wangxiao) Extract(rawURL string, opts *extractor.ExtractOpts) (*extract
 	if title == "" {
 		title = "wangxiao"
 	}
-	return &extractor.MediaInfo{Site: "wangxiao", Title: title, Entries: entries}, nil
+	extra := map[string]any{}
+	if productID != "" {
+		extra["product_id"] = productID
+	}
+	if itemNum != "" {
+		extra["item_num"] = itemNum
+	}
+	for _, key := range []string{"price", "raw_price", "title", "course_id", "course_num"} {
+		if v, ok := meta[key]; ok && fmt.Sprint(v) != "" {
+			extra[key] = v
+		}
+	}
+	if len(extra) == 0 {
+		extra = nil
+	}
+	return &extractor.MediaInfo{Site: "wangxiao", Title: title, Entries: entries, Extra: extra}, nil
 }
 
 func resolveRefEntries(c *util.Client, ref lessonRef, index int, headers map[string]string, quality string) ([]*extractor.MediaInfo, error) {
@@ -198,10 +234,10 @@ func resolveRefEntries(c *util.Client, ref lessonRef, index int, headers map[str
 			Streams: map[string]extractor.Stream{"default": {
 				Quality: "source",
 				URLs:    []string{fileURL},
-				Format:  resourceExt(fileURL),
+				Format:  firstNonEmpty(ref.FileFmt, resourceExt(fileURL)),
 				Headers: map[string]string{"Referer": ref.URL},
 			}},
-			Extra: map[string]any{"activity_id": ref.ActivityID, "lesson_url": ref.URL, "type": "file"},
+			Extra: map[string]any{"activity_id": ref.ActivityID, "lesson_url": ref.URL, "type": "file", "source_url": ref.FileURL},
 		})
 	}
 	if len(entries) == 0 {
@@ -284,15 +320,187 @@ func refsFromKeCatalog(c *util.Client, page, pageURL string, headers map[string]
 		return nil
 	}
 	refs := []lessonRef{}
+	productID := firstNonEmpty(firstGroup(productRe, pageURL), stringFromMap(extractWangxiaoPageMeta(page), "product_id"))
 	walkJSON(root["data"], func(node map[string]any) {
 		vid := firstString(node, "ccVideoId", "video_id", "videoId")
 		act := firstString(node, "activityid", "activity_id", "activityId")
-		if vid == "" && act == "" {
+		fileURL := firstString(node, "jiangYi", "handout_url", "file_url", "fileUrl", "download_url", "downloadUrl")
+		fileHTML := firstString(node, "jiangYiHtml", "file_html", "fileHtml", "html")
+		if vid == "" && act == "" && fileURL == "" && fileHTML == "" {
 			return
 		}
-		refs = append(refs, lessonRef{Title: firstString(node, "title", "courseName", "name"), URL: pageURL, ActivityID: act, ProductID: firstGroup(productRe, pageURL), VideoID: vid, SiteID: firstString(node, "ccUserId", "siteid", "siteId")})
+		refs = append(refs, lessonRef{
+			Title:      firstString(node, "title", "courseName", "name"),
+			URL:        pageURL,
+			ActivityID: act,
+			ProductID:  productID,
+			VideoID:    vid,
+			SiteID:     firstString(node, "ccUserId", "siteid", "siteId"),
+			FileURL:    normalizeURL(fileURL, pageURL),
+			FileHTML:   fileHTML,
+			FileFmt:    firstString(node, "file_fmt", "fileFmt", "file_type", "fileType"),
+			FileName:   firstString(node, "file_name", "fileName", "title", "courseName", "name"),
+		})
 	})
 	return refs
+}
+
+func isUserCourseURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Host)
+	path := strings.TrimRight(strings.ToLower(u.Path), "/")
+	return host == "k.wangxiao.cn" && path == "/user"
+}
+
+func fetchCourseList(c *util.Client, headers map[string]string) ([]wangxiaoCourse, error) {
+	body, err := c.GetString(userURL, headers)
+	if err != nil {
+		return nil, err
+	}
+	if isLoginPage(body) {
+		return nil, fmt.Errorf("wangxiao requires valid cookies")
+	}
+	return parseCourseListPage(body), nil
+}
+
+func parseCourseListPage(text string) []wangxiaoCourse {
+	blockRe := regexp.MustCompile(`(?is)<div\b[^>]*class=["'][^"']*\bcotent_box\b[^"']*["'][^>]*>.*?(?=<div\b[^>]*class=["'][^"']*\bcotent_box\b|</body>|$)`)
+	openRe := regexp.MustCompile(`(?is)^<div\b[^>]*>`)
+	titleRe := regexp.MustCompile(`(?is)<p\b[^>]*class=["'][^"']*\bplay_title\b[^"']*["'][^>]*>(.*?)</p>`)
+	imgHrefRe := regexp.MustCompile(`(?is)<img\b[^>]*(?:data-href|href)=["']([^"']+)["'][^>]*>`)
+	playHrefRe := regexp.MustCompile(`(?is)<a\b[^>]*href=["']([^"']*activityid=[^"']+)["'][^>]*>`)
+	var out []wangxiaoCourse
+	for _, block := range blockRe.FindAllString(text, -1) {
+		open := openRe.FindString(block)
+		productID := strings.ToLower(attrValue(open, "data-id"))
+		orderNumber := attrValue(open, "data-order")
+		itemURL := ""
+		if m := imgHrefRe.FindStringSubmatch(block); len(m) > 1 {
+			itemURL = normalizeURL(html.UnescapeString(m[1]), refererURL)
+		}
+		continueURL := ""
+		if m := playHrefRe.FindStringSubmatch(block); len(m) > 1 {
+			continueURL = normalizeURL(html.UnescapeString(m[1]), refererURL)
+		}
+		title := ""
+		if m := titleRe.FindStringSubmatch(block); len(m) > 1 {
+			title = cleanText(m[1])
+		}
+		course := wangxiaoCourse{
+			Title:       title,
+			ProductID:   firstNonEmpty(productID, firstGroup(productRe, continueURL)),
+			OrderNumber: orderNumber,
+			ItemNum:     firstGroup(itemRe, itemURL),
+			ItemURL:     itemURL,
+			ActivityID:  firstGroup(activityRe, continueURL),
+			ContinueURL: continueURL,
+		}
+		if course.ProductID == "" && course.ItemNum == "" && course.ActivityID == "" && course.Title == "" {
+			continue
+		}
+		out = append(out, course)
+	}
+	return out
+}
+
+func buildCourseListMedia(courses []wangxiaoCourse) *extractor.MediaInfo {
+	entries := make([]*extractor.MediaInfo, 0, len(courses))
+	for i, course := range courses {
+		title := strings.TrimSpace(course.Title)
+		if title == "" {
+			title = fmt.Sprintf("课程%d", i+1)
+		}
+		entries = append(entries, &extractor.MediaInfo{
+			Site:  "wangxiao",
+			Title: title,
+			Extra: map[string]any{
+				"product_id":   course.ProductID,
+				"course_order": course.OrderNumber,
+				"item_num":     course.ItemNum,
+				"item_url":     course.ItemURL,
+				"activity_id":  course.ActivityID,
+				"continue_url": course.ContinueURL,
+				"purchased":    true,
+			},
+		})
+	}
+	return &extractor.MediaInfo{Site: "wangxiao", Title: "wangxiao courses", Entries: entries, Extra: map[string]any{"count": len(entries), "list_only": true}}
+}
+
+func attrValue(tag, name string) string {
+	if tag == "" || name == "" {
+		return ""
+	}
+	re := regexp.MustCompile(`(?is)\b` + regexp.QuoteMeta(name) + `\s*=\s*["']([^"']*)["']`)
+	if m := re.FindStringSubmatch(tag); len(m) > 1 {
+		return html.UnescapeString(strings.TrimSpace(m[1]))
+	}
+	return ""
+}
+
+func extractWangxiaoPageMeta(page string) map[string]any {
+	out := map[string]any{}
+	var root map[string]any
+	if m := pageDataRe.FindStringSubmatch(page); len(m) > 1 {
+		_ = json.Unmarshal([]byte(m[1]), &root)
+	}
+	single, _ := root["singleInfo"].(map[string]any)
+	if len(single) == 0 {
+		return out
+	}
+	if title := strings.TrimSpace(fmt.Sprint(firstAny(single, "title", "name", "courseName"))); title != "" && title != "<nil>" {
+		out["title"] = cleanText(title)
+	}
+	if id := strings.TrimSpace(fmt.Sprint(firstAny(single, "id", "productId", "productsId"))); id != "" && id != "<nil>" {
+		out["product_id"] = strings.ToLower(id)
+		out["course_id"] = id
+	}
+	if num := strings.TrimSpace(fmt.Sprint(firstAny(single, "num", "itemNum"))); num != "" && num != "<nil>" {
+		out["course_num"] = num
+	}
+	if price, raw := extractWangxiaoPrice(single); raw != "" {
+		out["price"] = price
+		out["raw_price"] = raw
+	}
+	return out
+}
+
+func extractWangxiaoPrice(single map[string]any) (float64, string) {
+	for _, key := range []string{"activityPrice", "nowPrice", "oriPrice", "price", "salePrice"} {
+		if v, ok := single[key]; ok {
+			raw := strings.TrimSpace(fmt.Sprint(v))
+			if raw == "" || raw == "<nil>" {
+				continue
+			}
+			if f, ok := parsePrice(raw); ok {
+				return f, raw
+			}
+		}
+	}
+	return 0, ""
+}
+
+func parsePrice(raw string) (float64, bool) {
+	raw = strings.ReplaceAll(raw, ",", "")
+	m := regexp.MustCompile(`[-+]?\d+(?:\.\d+)?`).FindString(raw)
+	if m == "" {
+		return 0, false
+	}
+	var f float64
+	if _, err := fmt.Sscanf(m, "%f", &f); err != nil {
+		return 0, false
+	}
+	return f, true
+}
+
+func stringFromMap(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(m[key]))
 }
 
 func extractTitle(text string) string {
@@ -454,7 +662,7 @@ func extractOrderNumber(html string) string {
 }
 
 func extractFileURL(text string) string {
-	re := regexp.MustCompile(`https?://[^\s"'<>]+\.(?:pdf|doc|docx|mp4|mp3|zip)[^\s"'<>]*`)
+	re := regexp.MustCompile(`https?://[^\s"'<>]+\.(?:pdf|docx?|pptx?|xlsx?|mp4|m4a|mp3|aac|wav|flv|mkv|zip|rar|7z|txt|csv|caj)[^\s"'<>]*`)
 	if urls := re.FindAllString(text, -1); len(urls) > 0 {
 		return urls[0]
 	}
@@ -625,6 +833,13 @@ func rewriteWangxiaoM3U8(c *util.Client, m3u8URL, referer string) (string, error
 
 func resolveFileResourcesFromBody(c *util.Client, ref lessonRef, body string, headers map[string]string) []string {
 	candidates := []string{}
+	var out []string
+	if strings.TrimSpace(ref.FileHTML) != "" {
+		out = append(out, "data:text/html;charset=utf-8,"+url.PathEscape(ref.FileHTML))
+	}
+	if ref.FileURL != "" {
+		candidates = append(candidates, normalizeURL(ref.FileURL, ref.URL))
+	}
 	linkRe := regexp.MustCompile(`(?is)(?:href|src|data-href)=["']([^"']*(?:DownHandOut|down\.aspx)[^"']*)["']|["']([^"']*(?:DownHandOut|down\.aspx)[^"']*)["']`)
 	for _, m := range linkRe.FindAllStringSubmatch(body, -1) {
 		for _, group := range m[1:] {
@@ -640,7 +855,6 @@ func resolveFileResourcesFromBody(c *util.Client, ref lessonRef, body string, he
 			candidates = append(candidates, fmt.Sprintf(urlLiveHandout, ref.ActivityID))
 		}
 	}
-	var out []string
 	for _, candidate := range uniqueStrings(candidates) {
 		if u := resolveFileCandidate(c, candidate, headers); u != "" {
 			out = append(out, u)
@@ -652,6 +866,9 @@ func resolveFileResourcesFromBody(c *util.Client, ref lessonRef, body string, he
 func resolveFileCandidate(c *util.Client, candidate string, headers map[string]string) string {
 	if candidate == "" {
 		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(candidate), "data:") {
+		return candidate
 	}
 	resp, err := c.Get(candidate, headers)
 	if err != nil {
@@ -680,6 +897,10 @@ func resolveFileCandidate(c *util.Client, candidate string, headers map[string]s
 }
 
 func resourceExt(u string) string {
+	lower := strings.ToLower(u)
+	if strings.HasPrefix(lower, "data:text/html") || strings.HasPrefix(lower, "data:application/xhtml") {
+		return "html"
+	}
 	parsed, err := url.Parse(u)
 	target := u
 	if err == nil {

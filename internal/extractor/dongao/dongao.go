@@ -66,9 +66,6 @@ func (d *Dongao) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 		return nil, fmt.Errorf("dongao requires login cookies")
 	}
 	ids := parseIDs(rawURL)
-	if ids.CourseID == "" && ids.LectureID == "" && ids.SSID == "" && ids.SID == "" {
-		return nil, fmt.Errorf("cannot parse dongao course/lecture id from URL: %s", rawURL)
-	}
 
 	c := util.NewClient()
 	c.SetCookieJar(opts.Cookies)
@@ -77,16 +74,33 @@ func (d *Dongao) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 		"Referer": referer,
 		"Origin":  origin,
 	}
+	if cookie := dongaoCookieHeader(opts.Cookies); cookie != "" {
+		headers["Cookie"] = cookie
+	}
+	if err := validateDongaoLogin(c, opts.Cookies, headers); err != nil {
+		return nil, err
+	}
+
+	if opts.ListOnly || (ids.CourseID == "" && ids.LectureID == "" && ids.SSID == "" && ids.SID == "") {
+		courses, err := fetchDongaoCourseList(c, headers)
+		if err != nil {
+			return nil, err
+		}
+		if len(courses) == 0 {
+			return nil, fmt.Errorf("dongao: empty course list")
+		}
+		return dongaoCourseListMedia(courses), nil
+	}
 
 	if ids.LectureID != "" {
-		entry, err := resolveLecture(c, headers, ids.LectureID, "dongao_"+ids.LectureID)
+		entry, err := resolveLecture(c, headers, ids.LectureID, "dongao_"+ids.LectureID, opts.Quality)
 		if err != nil {
 			return nil, err
 		}
 		return entry, nil
 	}
 
-	entries, title, err := resolveCourse(c, headers, ids)
+	entries, title, err := resolveCourse(c, headers, ids, opts.Quality)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +110,7 @@ func (d *Dongao) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 	return &extractor.MediaInfo{Site: "dongao", Title: util.SanitizeFilename(firstNonEmpty(title, "dongao_"+ids.CourseID)), Entries: entries}, nil
 }
 
-func resolveCourse(c *util.Client, headers map[string]string, ids requestIDs) ([]*extractor.MediaInfo, string, error) {
+func resolveCourse(c *util.Client, headers map[string]string, ids requestIDs, quality string) ([]*extractor.MediaInfo, string, error) {
 	var title string
 	var nodes []lectureNode
 	var direct []*extractor.MediaInfo
@@ -146,7 +160,7 @@ func resolveCourse(c *util.Client, headers map[string]string, ids requestIDs) ([
 			continue
 		}
 		seen[node.ID] = true
-		entry, err := resolveLecture(c, headers, node.ID, node.Title)
+		entry, err := resolveLecture(c, headers, node.ID, node.Title, quality)
 		if err == nil {
 			entries = append(entries, entry)
 			lectureResources = append(lectureResources, resourceRefsFromExtra(entry)...)
@@ -157,7 +171,7 @@ func resolveCourse(c *util.Client, headers map[string]string, ids requestIDs) ([
 	return dedupeMediaEntries(entries), title, nil
 }
 
-func resolveLecture(c *util.Client, headers map[string]string, lectureID, fallbackTitle string) (*extractor.MediaInfo, error) {
+func resolveLecture(c *util.Client, headers map[string]string, lectureID, fallbackTitle, quality string) (*extractor.MediaInfo, error) {
 	playURL := fmt.Sprintf(lecture_url, url.PathEscape(lectureID))
 	h := cloneHeaders(headers)
 	h["Referer"] = referer
@@ -172,69 +186,111 @@ func resolveLecture(c *util.Client, headers map[string]string, lectureID, fallba
 	title := util.SanitizeFilename(firstNonEmpty(parseTitle(body), fallbackTitle, lectureID))
 	resourceRefs := collectResourceRefsFromText(body, playURL)
 
-	// Try direct media URL first (plaintext flow)
-	if media := findMediaInText(body); media != "" {
-		entry := mediaInfo(title, media, h)
-		addResourceExtra(entry, resourceRefs)
-		return entry, nil
+	if listen := parseListenParam(body); len(listen) > 0 {
+		if media, pickedQuality := pickDongaoVideoSource(listen, quality); media != "" {
+			entry := mediaInfoWithQuality(title, media, h, pickedQuality)
+			if strings.Contains(strings.ToLower(media), ".m3u8") {
+				if stream, err := resolveSignedM3U8(c, media, body, lectureID, h); err == nil {
+					entry.Streams["best"] = stream
+				}
+			}
+			addResourceExtra(entry, resourceRefs)
+			return entry, nil
+		}
 	}
 
-	// Encrypted flow: extract player fields, build signed m3u8
-	fields := extractPlayerFields(body)
-	if len(fields) > 0 {
-		// Look for m3u8 URL in the lecture HTML
+	if fields := completePlayerFields(extractPlayerFields(body), headers); len(fields) > 0 {
 		m3u8URL := findMediaInTextWithExt(body, ".m3u8")
 		if m3u8URL == "" {
-			// Try extracting from mainSource/videoSource pattern
 			m3u8URL = extractM3U8FromPlayerData(body)
 		}
 		if m3u8URL != "" {
-			m3u8Headers := cloneHeaders(h)
-			m3u8Headers["Accept"] = "application/vnd.apple.mpegurl, application/x-mpegURL, */*"
-			m3u8Headers["X-Requested-With"] = "XMLHttpRequest"
-			m3u8Text, err := c.GetString(m3u8URL, m3u8Headers)
-			if err == nil && strings.Contains(m3u8Text, "#EXTM3U") {
-				signedM3U8, aesKey, _ := buildSignedM3U8(m3u8Text, fields, m3u8URL)
-				streamURL := m3u8URL
-				if strings.Contains(signedM3U8, "#EXTM3U") && signedM3U8 != m3u8Text {
-					streamURL = m3u8DataURL(signedM3U8)
-				}
-				stream := extractor.Stream{
-					Quality: "best",
-					URLs:    []string{streamURL},
-					Format:  "m3u8",
-					Headers: m3u8Headers,
-				}
-				if len(aesKey) > 0 {
-					stream.Headers["X-Dongao-TS-Key"] = fmt.Sprintf("%x", aesKey)
-				}
-				entry := &extractor.MediaInfo{
-					Site:    "dongao",
-					Title:   title,
-					Streams: map[string]extractor.Stream{"best": stream},
-				}
+			stream, err := resolveSignedM3U8WithFields(c, m3u8URL, body, lectureID, h, fields)
+			if err == nil {
+				entry := &extractor.MediaInfo{Site: "dongao", Title: title, Streams: map[string]extractor.Stream{"best": stream}}
 				addResourceExtra(entry, resourceRefs)
 				return entry, nil
 			}
 		}
 	}
 
+	// Plaintext fallback after protected-player parsing.
+	if media := findMediaInText(body); media != "" {
+		entry := mediaInfo(title, media, h)
+		if strings.Contains(strings.ToLower(media), ".m3u8") {
+			if stream, err := resolveSignedM3U8(c, media, body, lectureID, h); err == nil {
+				entry.Streams["best"] = stream
+			}
+		}
+		addResourceExtra(entry, resourceRefs)
+		return entry, nil
+	}
+
 	return nil, fmt.Errorf("dongao: no media source in lecture %s", lectureID)
 }
 
+func resolveSignedM3U8(c *util.Client, mediaURL, lectureHTML, lectureID string, headers map[string]string) (extractor.Stream, error) {
+	return resolveSignedM3U8WithFields(c, mediaURL, lectureHTML, lectureID, headers, completePlayerFields(extractPlayerFields(lectureHTML), headers))
+}
+
+func resolveSignedM3U8WithFields(c *util.Client, mediaURL, lectureHTML, lectureID string, headers map[string]string, fields map[string]string) (extractor.Stream, error) {
+	if len(fields) == 0 {
+		return extractor.Stream{}, fmt.Errorf("dongao m3u8: missing player fields")
+	}
+	m3u8Headers := cloneHeaders(headers)
+	m3u8Headers["Referer"] = fmt.Sprintf(lecture_url, url.PathEscape(lectureID))
+	m3u8Headers["Accept"] = "application/vnd.apple.mpegurl, application/x-mpegURL, */*"
+	m3u8Headers["X-Requested-With"] = "XMLHttpRequest"
+	signedURL := signDongaoMediaURL(mediaURL, fields)
+	m3u8Text, err := c.GetString(signedURL, m3u8Headers)
+	if err != nil || !strings.Contains(m3u8Text, "#EXTM3U") {
+		m3u8Text, err = c.GetString(mediaURL, m3u8Headers)
+	}
+	if err != nil {
+		return extractor.Stream{}, err
+	}
+	if !strings.Contains(m3u8Text, "#EXTM3U") {
+		return extractor.Stream{}, fmt.Errorf("dongao: not an m3u8 manifest")
+	}
+	signedM3U8, aesKey, _ := buildSignedM3U8(m3u8Text, fields, signedURL)
+	streamURL := signedURL
+	if strings.Contains(signedM3U8, "#EXTM3U") && signedM3U8 != m3u8Text {
+		streamURL = m3u8DataURL(signedM3U8)
+	}
+	stream := extractor.Stream{Quality: "best", URLs: []string{streamURL}, Format: "m3u8", NeedMerge: true, Headers: m3u8Headers}
+	if len(aesKey) > 0 {
+		stream.Headers["X-Dongao-TS-Key"] = fmt.Sprintf("%x", aesKey)
+	}
+	return stream, nil
+}
+
 func requestCourseAPIs(c *util.Client, headers map[string]string, ids requestIDs) []any {
-	form := map[string]string{
+	seasonForm := map[string]string{
 		"lecturerId": ids.Lecturer,
 		"ssid":       ids.SSID,
 		"sid":        ids.SID,
-		"courseId":   ids.CourseID,
 	}
+	courseForm := cloneStringMap(seasonForm)
+	courseForm["courseId"] = ids.CourseID
+	liveForm := cloneStringMap(seasonForm)
+	liveForm["liveCourseId"] = ids.CourseID
 	apiHeaders := cloneHeaders(headers)
 	apiHeaders["Referer"] = device_verify_referer
 	apiHeaders["Origin"] = device_verify_origin
 	var out []any
-	for _, api := range []string{stage_list_url, detail_infos_url, live_number_list_url, live_linked_lecture_url, stage_probe_url} {
-		body, err := c.PostForm(api, form, apiHeaders)
+	for _, req := range []struct {
+		api  string
+		form map[string]string
+	}{
+		{stage_list_url, seasonForm},
+		{detail_infos_url, seasonForm},
+		{live_number_list_url, liveForm},
+		{live_linked_lecture_url, liveForm},
+		{stage_probe_url, seasonForm},
+		{stage_list_url, courseForm},
+		{detail_infos_url, courseForm},
+	} {
+		body, err := c.PostForm(req.api, req.form, apiHeaders)
 		if err != nil {
 			continue
 		}

@@ -170,6 +170,8 @@ func TestExtractMock(t *testing.T) {
 	fixtures := loadFixtures(t)
 	installMockTransport(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Host == "wap.wendao101.com" && r.Method == http.MethodPost && r.URL.Path == "/wap/home_page/course/purchased":
+			writeFixture(t, w, fixtures, "course_list")
 		case r.Host == "wap.wendao101.com" && r.Method == http.MethodPost && r.URL.Path == "/wap/course/detail":
 			writeFixture(t, w, fixtures, "detail")
 		default:
@@ -198,5 +200,19 @@ func TestExtractMock(t *testing.T) {
 	got := firstPlayableURL(info)
 	if !strings.Contains(got, "cdn.example.com/wendao.mp4") {
 		t.Fatalf("playable URL %q does not contain expected fixture URL", got)
+	}
+	if len(info.Entries) != 3 {
+		t.Fatalf("entries=%d, want video+audio+file", len(info.Entries))
+	}
+	formats := map[string]bool{}
+	for _, entry := range info.Entries {
+		for _, stream := range entry.Streams {
+			formats[stream.Format] = true
+		}
+	}
+	for _, want := range []string{"mp4", "mp3", "pdf"} {
+		if !formats[want] {
+			t.Fatalf("missing %s stream in formats %#v", want, formats)
+		}
 	}
 }

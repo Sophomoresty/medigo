@@ -275,14 +275,16 @@ func resolveLiveReplay(cookie, roomID, liveUUID string) (*liveReplayResult, erro
 	result := &liveReplayResult{
 		RoomID:   roomID,
 		LiveUUID: liveUUID,
+		Extra:    map[string]any{},
 	}
 
 	// Try download permission first (gives direct downloadable URLs)
-	dlResult, dlErr := resolveDownloadPlaylist(client, liveUUID, roomID, cookie)
+	dlResult, dlErr := resolveDownloadPlaylist(client, liveUUID, roomID, "", cookie)
 	if dlErr == nil && dlResult != nil {
 		result.PlaybackURLs = dlResult.urls
 		result.Title = dlResult.title
 		result.M3U8Content = dlResult.m3u8Content
+		result.Extra["root_playlist"] = dlResult.extra()
 		return result, nil
 	}
 
@@ -299,19 +301,39 @@ func resolveLiveReplay(cookie, roomID, liveUUID string) (*liveReplayResult, erro
 		}
 		result.Title = summary.title
 		result.PlaybackURLs = summary.playbackURLs
+		if summary.anchorID != "" {
+			if dlResult, err := resolveDownloadPlaylist(client, liveUUID, roomID, summary.anchorID, cookie); err == nil && dlResult != nil {
+				result.PlaybackURLs = dlResult.urls
+				result.M3U8Content = dlResult.m3u8Content
+				result.Extra["root_playlist"] = dlResult.extra()
+			}
+		}
 		return result, nil
 	}
 
 	result.Title = roomInfo.title
 	result.PlaybackURLs = roomInfo.playbackURLs
+	if roomInfo.anchorID != "" {
+		if dlResult, err := resolveDownloadPlaylist(client, liveUUID, roomID, roomInfo.anchorID, cookie); err == nil && dlResult != nil {
+			result.PlaybackURLs = dlResult.urls
+			result.M3U8Content = dlResult.m3u8Content
+			result.Extra["root_playlist"] = dlResult.extra()
+			return result, nil
+		}
+	}
 
 	// Resolve H5 playlist to get M3U8 content
 	if len(result.PlaybackURLs) > 0 {
 		for _, pbURL := range result.PlaybackURLs {
 			h5, err := resolveH5Playlist(client, liveUUID, pbURL)
 			if err == nil && h5.content != "" {
-				result.M3U8Content = absolutizeM3U8(h5.content, pbURL)
+				result.M3U8Content = prepareDingTalkM3U8Text(h5.content, pbURL, h5.playbackToken)
 				result.PlaybackToken = h5.playbackToken
+				result.Extra["root_playlist"] = map[string]any{
+					"source":        "getH5PlayUrl",
+					"playbackUrl":   pbURL,
+					"playbackToken": h5.playbackToken,
+				}
 				break
 			}
 		}
@@ -353,13 +375,15 @@ func resolvePublicLiveShare(cookie, encCid, liveUUID, pcCode string) (*liveRepla
 		LiveUUID:     liveUUID,
 		Title:        publicInfo.title,
 		PlaybackURLs: publicInfo.playbackURLs,
+		Extra:        map[string]any{"cid": publicInfo.cid},
 	}
 
 	// Fetch the M3U8 content directly (public shares often have accessible M3U8 URLs)
 	if len(result.PlaybackURLs) > 0 {
 		m3u8Content, err := fetchDirectPlaylist(result.PlaybackURLs[0], cookie)
 		if err == nil && m3u8Content != "" {
-			result.M3U8Content = absolutizeM3U8(m3u8Content, result.PlaybackURLs[0])
+			result.M3U8Content = prepareDingTalkM3U8Text(m3u8Content, result.PlaybackURLs[0], "")
+			result.Extra["root_playlist"] = map[string]any{"source": "direct", "playbackUrl": result.PlaybackURLs[0]}
 		}
 	}
 
@@ -404,11 +428,42 @@ func resolveAITranscribe(cookie, minutesUUID string) (*liveReplayResult, error) 
 	if title == "" {
 		title = "dingtalk_transcribe_" + minutesUUID
 	}
+	extra := map[string]any{
+		"minutes_uuid": minutesUUID,
+		"media_urls":   append([]string(nil), mediaURLs...),
+	}
+	bestURL := choosePreferredMediaURL(mediaURLs)
+	if strings.Contains(strings.ToLower(bestURL), ".m3u8") {
+		if backupUUID := extractLiveUUIDFromMediaURL(bestURL); backupUUID != "" {
+			extra["backup_live_uuid"] = backupUUID
+			if dlResult, err := resolveDownloadPlaylist(client, backupUUID, "", "", cookie); err == nil && dlResult != nil {
+				extra["root_playlist"] = dlResult.extra()
+				return &liveReplayResult{
+					LiveUUID:     minutesUUID,
+					Title:        title,
+					PlaybackURLs: dlResult.urls,
+					M3U8Content:  dlResult.m3u8Content,
+					Extra:        extra,
+				}, nil
+			}
+		}
+		if m3u8Content, err := fetchDirectPlaylist(bestURL, cookie); err == nil && m3u8Content != "" {
+			extra["root_playlist"] = map[string]any{"source": "direct", "playbackUrl": bestURL}
+			return &liveReplayResult{
+				LiveUUID:     minutesUUID,
+				Title:        title,
+				PlaybackURLs: mediaURLs,
+				M3U8Content:  prepareDingTalkM3U8Text(m3u8Content, bestURL, ""),
+				Extra:        extra,
+			}, nil
+		}
+	}
 
 	return &liveReplayResult{
 		LiveUUID:     minutesUUID,
 		Title:        title,
 		PlaybackURLs: mediaURLs,
+		Extra:        extra,
 	}, nil
 }
 
@@ -419,6 +474,7 @@ func resolveAITranscribe(cookie, minutesUUID string) (*liveReplayResult, error) 
 type roomInfoResult struct {
 	title        string
 	playbackURLs []string
+	anchorID     string
 }
 
 func resolveLiveRoom(client *lwpClient, roomID, liveUUID string) (*roomInfoResult, error) {
@@ -469,6 +525,7 @@ func resolveLiveRoom(client *lwpClient, roomID, liveUUID string) (*roomInfoResul
 	return &roomInfoResult{
 		title:        title,
 		playbackURLs: playbackURLs,
+		anchorID:     findFirstString(respBody, "anchorId", "anchorUid", "anchor"),
 	}, nil
 }
 
@@ -508,26 +565,46 @@ type downloadResult struct {
 	urls        []string
 	title       string
 	m3u8Content string
+	sourceURL   string
+	anchorID    string
 }
 
-func resolveDownloadPlaylist(client *lwpClient, liveUUID, roomID, cookie string) (*downloadResult, error) {
+func (d *downloadResult) extra() map[string]any {
+	if d == nil {
+		return nil
+	}
+	return map[string]any{
+		"source":      "hasDownloadPermission",
+		"playbackUrl": d.sourceURL,
+		"anchorId":    d.anchorID,
+	}
+}
+
+func resolveDownloadPlaylist(client *lwpClient, liveUUID, roomID, anchorID, cookie string) (*downloadResult, error) {
 	if liveUUID == "" {
 		return nil, fmt.Errorf("missing liveUuid")
 	}
 
 	// Try hasDownloadPermission with different body shapes
-	bodies := [][]any{
-		{map[string]string{
-			"liveUuid": liveUUID,
-		}},
+	var bodies [][]any
+	addBody := func(m map[string]string) {
+		key := m["cid"] + "|" + m["liveUuid"] + "|" + m["anchorId"]
+		for _, body := range bodies {
+			if existing, ok := body[0].(map[string]string); ok && existing["cid"]+"|"+existing["liveUuid"]+"|"+existing["anchorId"] == key {
+				return
+			}
+		}
+		bodies = append(bodies, []any{m})
+	}
+	addBody(map[string]string{"liveUuid": liveUUID})
+	if anchorID != "" {
+		addBody(map[string]string{"liveUuid": liveUUID, "anchorId": anchorID})
 	}
 	if roomID != "" {
-		bodies = append(bodies, []any{
-			map[string]string{
-				"cid":      roomID,
-				"liveUuid": liveUUID,
-			},
-		})
+		addBody(map[string]string{"cid": roomID, "liveUuid": liveUUID})
+		if anchorID != "" {
+			addBody(map[string]string{"cid": roomID, "liveUuid": liveUUID, "anchorId": anchorID})
+		}
 	}
 
 	for _, body := range bodies {
@@ -552,13 +629,17 @@ func resolveDownloadPlaylist(client *lwpClient, liveUUID, roomID, cookie string)
 		}
 
 		// Try to fetch the M3U8 content directly
-		result := &downloadResult{urls: urls}
+		result := &downloadResult{urls: urls, anchorID: anchorID}
 		for _, u := range urls {
 			content, err := fetchDirectPlaylist(u, cookie)
 			if err == nil && strings.Contains(content, "#EXTM3U") {
 				result.m3u8Content = absolutizeM3U8(content, u)
+				result.sourceURL = u
 				break
 			}
+		}
+		if result.sourceURL == "" {
+			result.sourceURL = urls[0]
 		}
 		return result, nil
 	}
@@ -620,6 +701,7 @@ func resolveLivePublicInfo(client *lwpClient, encCid, liveUUID, pcCode string) (
 type recordSummaryResult struct {
 	title        string
 	playbackURLs []string
+	anchorID     string
 }
 
 func resolveLiveRecordSummary(client *lwpClient, liveUUID string) (*recordSummaryResult, error) {
@@ -658,6 +740,7 @@ func resolveLiveRecordSummary(client *lwpClient, liveUUID string) (*recordSummar
 		return &recordSummaryResult{
 			title:        title,
 			playbackURLs: urls,
+			anchorID:     findFirstString(item, "anchorId", "anchorUid", "anchor"),
 		}, nil
 	}
 

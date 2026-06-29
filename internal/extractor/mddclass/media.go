@@ -9,6 +9,14 @@ import (
 	"strings"
 )
 
+type mddclassFileMaterial struct {
+	URL    string
+	Title  string
+	Format string
+	Size   int64
+	Raw    map[string]any
+}
+
 func mddclassPayloadSuccess(payload map[string]any) bool {
 	if payload == nil {
 		return false
@@ -103,7 +111,7 @@ func mddclassCollectCoursewareInfo(value any, out map[string]any, depth int) {
 				mddclassCollectCoursewareInfo(nested, out, depth+1)
 			}
 		}
-		for _, pair := range [][2]string{{"tenantId", "tenantId"}, {"tenant_id", "tenantId"}, {"userSign", "userSign"}, {"user_sign", "userSign"}, {"ocsId", "coursewareId"}, {"coursewareId", "coursewareId"}, {"courseware_id", "coursewareId"}, {"ocs_id", "coursewareId"}, {"courseWareId", "coursewareId"}, {"courseId", "courseId"}, {"course_id", "courseId"}, {"videoId", "videoId"}, {"video_id", "videoId"}, {"contentId", "videoId"}, {"content_id", "videoId"}, {"sourceType", "sourceType"}, {"source_type", "sourceType"}, {"contentType", "contentType"}, {"content_type", "contentType"}, {"companyId", "companyId"}, {"company_id", "companyId"}, {"sellerId", "companyId"}, {"seller_id", "companyId"}, {"gatewayCompanyId", "companyId"}, {"gateway_company_id", "companyId"}, {"userSignKey", "userSignKey"}, {"user_sign_key", "userSignKey"}, {"xUserSign", "userSign"}, {"signature", "userSign"}, {"sign", "userSign"}, {"ocsAccessToken", "ocsAccessToken"}, {"ocs_access_token", "ocsAccessToken"}, {"ocsPlayerAccessToken", "ocsAccessToken"}, {"playerAccessToken", "ocsAccessToken"}, {"player_access_token", "ocsAccessToken"}, {"videoUrl", "videoUrl"}, {"playUrl", "videoUrl"}, {"play_url", "videoUrl"}, {"m3u8Url", "videoUrl"}, {"m3u8_url", "videoUrl"}, {"hlsUrl", "videoUrl"}, {"hls_url", "videoUrl"}, {"mediaUrl", "videoUrl"}, {"mediaURL", "videoUrl"}, {"mp4URL", "videoUrl"}, {"mp4Url", "videoUrl"}, {"downloadUrl", "videoUrl"}, {"download_url", "videoUrl"}, {"sourceUrl", "videoUrl"}, {"sourceURL", "videoUrl"}, {"resourceUrl", "videoUrl"}, {"fileUrl", "videoUrl"}, {"url", "videoUrl"}, {"path", "videoPath"}, {"filePath", "videoPath"}, {"mediaPath", "videoPath"}, {"resourcePath", "videoPath"}, {"sourcePath", "videoPath"}, {"playPath", "videoPath"}, {"hlsPath", "videoPath"}, {"m3u8Path", "videoPath"}, {"mp4Path", "videoPath"}, {"objectKey", "videoPath"}, {"key", "videoPath"}} {
+		for _, pair := range [][2]string{{"tenantId", "tenantId"}, {"tenant_id", "tenantId"}, {"userSign", "userSign"}, {"user_sign", "userSign"}, {"ocsId", "coursewareId"}, {"coursewareId", "coursewareId"}, {"courseware_id", "coursewareId"}, {"ocs_id", "coursewareId"}, {"courseWareId", "coursewareId"}, {"courseId", "courseId"}, {"course_id", "courseId"}, {"videoId", "videoId"}, {"video_id", "videoId"}, {"contentId", "videoId"}, {"content_id", "videoId"}, {"sourceType", "sourceType"}, {"source_type", "sourceType"}, {"contentType", "contentType"}, {"content_type", "contentType"}, {"companyId", "companyId"}, {"company_id", "companyId"}, {"sellerId", "companyId"}, {"seller_id", "companyId"}, {"gatewayCompanyId", "companyId"}, {"gateway_company_id", "companyId"}, {"userSignKey", "userSignKey"}, {"user_sign_key", "userSignKey"}, {"xUserSign", "userSign"}, {"signature", "userSign"}, {"sign", "userSign"}, {"ocsAccessToken", "ocsAccessToken"}, {"ocs_access_token", "ocsAccessToken"}, {"ocsPlayerAccessToken", "ocsAccessToken"}, {"playerAccessToken", "ocsAccessToken"}, {"player_access_token", "ocsAccessToken"}, {"videoUrl", "videoUrl"}, {"playUrl", "videoUrl"}, {"play_url", "videoUrl"}, {"m3u8Url", "videoUrl"}, {"m3u8_url", "videoUrl"}, {"hlsUrl", "videoUrl"}, {"hls_url", "videoUrl"}, {"mediaUrl", "videoUrl"}, {"mediaURL", "videoUrl"}, {"mp4URL", "videoUrl"}, {"mp4Url", "videoUrl"}, {"sourceUrl", "videoUrl"}, {"sourceURL", "videoUrl"}, {"path", "videoPath"}, {"filePath", "videoPath"}, {"mediaPath", "videoPath"}, {"resourcePath", "videoPath"}, {"sourcePath", "videoPath"}, {"playPath", "videoPath"}, {"hlsPath", "videoPath"}, {"m3u8Path", "videoPath"}, {"mp4Path", "videoPath"}, {"objectKey", "videoPath"}, {"key", "videoPath"}} {
 			if current := mddclassFirstText(out[pair[1]]); current == "" {
 				if value := mddclassFirstText(m[pair[0]]); value != "" {
 					out[pair[1]] = value
@@ -136,8 +144,13 @@ func mddclassFindMediaURLDepth(value any, depth int) string {
 		return ""
 	}
 	if m, ok := value.(map[string]any); ok {
-		for _, key := range []string{"videoUrl", "playUrl", "play_url", "m3u8Url", "m3u8_url", "hlsUrl", "hls_url", "mediaUrl", "mediaURL", "mp4URL", "mp4Url", "downloadUrl", "download_url", "sourceUrl", "sourceURL", "resourceUrl", "fileUrl"} {
+		for _, key := range []string{"videoUrl", "playUrl", "play_url", "m3u8Url", "m3u8_url", "hlsUrl", "hls_url", "mediaUrl", "mediaURL", "mp4URL", "mp4Url"} {
 			if u := mddclassNormalizeMediaURL(mddclassFirstText(m[key])); u != "" && !mddclassIsPlaceholderURL(u) {
+				return u
+			}
+		}
+		for _, key := range []string{"downloadUrl", "download_url", "sourceUrl", "sourceURL", "resourceUrl", "resource_url", "fileUrl", "file_url"} {
+			if u := mddclassNormalizeMediaURL(mddclassFirstText(m[key])); u != "" && !mddclassIsPlaceholderURL(u) && mddclassLooksLikeMediaURL(u) {
 				return u
 			}
 		}
@@ -216,6 +229,98 @@ func mddclassIsPlaceholderURL(raw string) bool {
 func mddclassLooksLikeMediaURL(raw string) bool {
 	lower := strings.ToLower(raw)
 	return strings.Contains(lower, ".m3u8") || strings.Contains(lower, ".mp4") || strings.Contains(lower, ".flv") || strings.Contains(lower, ".ts") || strings.Contains(lower, "/hls/") || strings.Contains(lower, "video")
+}
+
+func mddclassFindFileMaterial(values ...any) (mddclassFileMaterial, bool) {
+	seen := map[string]bool{}
+	var found mddclassFileMaterial
+	var walk func(any, int)
+	walk = func(value any, depth int) {
+		if depth > 8 || value == nil || found.URL != "" {
+			return
+		}
+		switch x := value.(type) {
+		case map[string]any:
+			for _, key := range []string{
+				"fileUrl", "file_url", "documentUrl", "document_url", "studyFileUrl", "study_file_url",
+				"materialUrl", "material_url", "attachmentUrl", "attachment_url", "attachUrl", "attach_url",
+				"downloadUrl", "download_url", "resourceUrl", "resource_url", "sourceUrl", "source_url",
+				"url", "href", "path", "filePath", "resourcePath", "objectKey",
+			} {
+				rawURL := mddclassNormalizeFileURL(mddclassFirstText(x[key]))
+				format := mddclassFileFormat(rawURL)
+				if rawURL == "" || format == "" || mddclassIsPlaceholderURL(rawURL) || seen[rawURL] {
+					continue
+				}
+				seen[rawURL] = true
+				found = mddclassFileMaterial{
+					URL:    rawURL,
+					Title:  mddclassFirstText(x["fileName"], x["file_name"], x["studyFileName"], x["study_file_name"], x["materialName"], x["material_name"], x["resourceName"], x["resource_name"], x["attachmentName"], x["attachment_name"], x["name"], x["title"], x["contentTitle"], x["directoryName"]),
+					Format: format,
+					Size:   mddclassInt64(x["fileSize"], x["file_size"], x["studyFileSize"], x["resourceSize"], x["totalSize"], x["size"]),
+					Raw:    x,
+				}
+				return
+			}
+			for _, key := range []string{"attachments", "attachmentList", "materials", "materialList", "resources", "resourceList", "files", "fileList", "studyFiles", "documents", "docs", "coursewareFiles", "coursewareInfo", "courseWareInfo", "resourceInfo", "detail", "raw"} {
+				walk(x[key], depth+1)
+			}
+			for _, nested := range x {
+				walk(nested, depth+1)
+			}
+		case []any:
+			for _, item := range x {
+				walk(item, depth+1)
+			}
+		}
+	}
+	for _, value := range values {
+		walk(value, 0)
+		if found.URL != "" {
+			if found.Title == "" {
+				found.Title = "资料"
+			}
+			return found, true
+		}
+	}
+	return mddclassFileMaterial{}, false
+}
+
+func mddclassNormalizeFileURL(raw string) string {
+	raw = strings.TrimSpace(strings.Trim(raw, `"'`))
+	raw = strings.ReplaceAll(raw, `\u0026`, "&")
+	raw = strings.ReplaceAll(raw, `\/`, `/`)
+	raw = strings.ReplaceAll(raw, "&amp;", "&")
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "//") {
+		return "https:" + raw
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		return raw
+	}
+	if strings.HasPrefix(raw, "/") || strings.Contains(raw, "/") {
+		return strings.TrimRight(mddclassOCSMaterialHost, "/") + "/" + strings.TrimLeft(raw, "/")
+	}
+	return strings.TrimRight(mddclassOCSMaterialHost, "/") + "/" + strings.TrimLeft(raw, "/")
+}
+
+func mddclassFileFormat(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	ext := strings.TrimPrefix(strings.ToLower(stdpath.Ext(u.Path)), ".")
+	switch ext {
+	case "pdf", "ppt", "pptx", "doc", "docx", "xls", "xlsx", "zip", "rar", "7z", "txt", "md", "csv", "jpg", "jpeg", "png", "gif", "webp":
+		return ext
+	default:
+		return ""
+	}
 }
 
 func mddclassStreamFormat(raw string) string {

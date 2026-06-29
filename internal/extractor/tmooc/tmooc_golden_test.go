@@ -172,12 +172,14 @@ func TestExtractMock(t *testing.T) {
 		switch {
 		case r.Host == "uc.tmooc.cn" && r.Method == http.MethodGet && r.URL.Path == "/studentCenter/toMyttsPage":
 			writeFixture(t, w, fixtures, "course_list")
-		case r.Host == "ttsservice.tmooc.cn" && r.Method == http.MethodGet && r.URL.Path == "/tedu-student/v1/login/toLogin":
+		case r.Host == "ttsservice.tmooc.cn" && r.URL.Path == "/tedu-student/v1/login/toLogin":
 			writeFixture(t, w, fixtures, "login")
 		case r.Host == "ttsservice.tmooc.cn" && r.Method == http.MethodGet && r.URL.Path == "/tedu-student/v1/study-center/formal":
 			writeFixture(t, w, fixtures, "outline")
 		case r.Host == "ttsservice.tmooc.cn" && r.Method == http.MethodGet && r.URL.Path == "/tedu-student/v1/video/find-playback-msg/vid-1":
 			writeFixture(t, w, fixtures, "video_play")
+		case r.Host == "ttsservice.tmooc.cn" && r.Method == http.MethodGet && r.URL.Path == "/tedu-student/v1/video/find-playback-msg/vid-2":
+			writeFixture(t, w, fixtures, "video_play_2")
 		default:
 			t.Errorf("unexpected request: %s %s%s", r.Method, r.Host, r.URL.String())
 			http.NotFound(w, r)
@@ -203,5 +205,19 @@ func TestExtractMock(t *testing.T) {
 	got := firstPlayableURL(info)
 	if !strings.Contains(got, "cdn.example.com/tmooc.mp4") {
 		t.Fatalf("playable URL %q does not contain expected fixture URL", got)
+	}
+	if len(info.Entries) != 2 {
+		t.Fatalf("entries=%d, want 2", len(info.Entries))
+	}
+	formats := map[string]bool{}
+	for _, entry := range info.Entries {
+		for _, stream := range entry.Streams {
+			formats[stream.Format] = true
+		}
+	}
+	for _, want := range []string{"mp4", "m3u8"} {
+		if !formats[want] {
+			t.Fatalf("missing %s stream in formats %#v", want, formats)
+		}
 	}
 }

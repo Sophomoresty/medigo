@@ -298,6 +298,28 @@ func walk(v any, fn func(map[string]any)) {
 	}
 }
 
+func extractNamedList(v any, keys ...string) []any {
+	var out []any
+	walk(v, func(m map[string]any) {
+		if len(out) > 0 {
+			return
+		}
+		for _, key := range keys {
+			if list := asAnyList(m[key]); len(list) > 0 {
+				out = list
+				return
+			}
+		}
+	})
+	if len(out) > 0 {
+		return out
+	}
+	if list := asAnyList(v); len(list) > 0 {
+		return list
+	}
+	return nil
+}
+
 func asAnyMap(v any) map[string]any {
 	if m, ok := v.(map[string]any); ok {
 		return m
@@ -475,6 +497,11 @@ func mergeFileItem(base, detail fileItem) fileItem {
 
 func sameID(a, b string) bool {
 	return strings.TrimSpace(a) != "" && strings.TrimSpace(a) == strings.TrimSpace(b)
+}
+
+func sameFileIdentity(f fileItem, id string) bool {
+	id = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(id, "history_"), "homework_"))
+	return sameID(f.ID, id) || sameID(f.MyID, id) || sameID(f.VideoID, id) || sameID(f.Vid, id)
 }
 
 func prefixTitle(prefix, title string) string {
@@ -728,6 +755,88 @@ func regionFromEndpoint(host string) string {
 		}
 	}
 	return ""
+}
+
+func normalizeOSSRegion(region string) string {
+	region = strings.TrimSpace(region)
+	if strings.HasPrefix(region, "oss-") {
+		return strings.TrimPrefix(region, "oss-")
+	}
+	return region
+}
+
+func normalizePlasoStorageObjectKey(location, locationPath string) string {
+	location = strings.TrimSpace(strings.ReplaceAll(location, `\/`, `/`))
+	locationPath = strings.Trim(strings.TrimSpace(strings.ReplaceAll(locationPath, `\/`, `/`)), "/")
+	if location == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(location), "http://") || strings.HasPrefix(strings.ToLower(location), "https://") {
+		return location
+	}
+	objectKey := strings.TrimLeft(location, "/")
+	if locationPath == "" {
+		return objectKey
+	}
+	if strings.HasPrefix(strings.ToLower(objectKey), strings.ToLower(locationPath)+"/") {
+		return objectKey
+	}
+	return locationPath + "/" + objectKey
+}
+
+func plasoPolyvSignInfo(v any) map[string]string {
+	out := map[string]string{}
+	walk(v, func(m map[string]any) {
+		for _, key := range []string{"sign", "ts", "timestamp", "token"} {
+			if out[key] == "" {
+				out[key] = firstText(m, key)
+			}
+		}
+	})
+	return out
+}
+
+func (s *plasoSession) aliPlayRequestDataVariants(f fileItem) []map[string]string {
+	base := s.playRequestData(f)
+	var out []map[string]string
+	add := func(m map[string]string) {
+		keyParts := make([]string, 0, len(m))
+		for k, v := range m {
+			if strings.TrimSpace(v) != "" {
+				keyParts = append(keyParts, k+"="+v)
+			}
+		}
+		if len(keyParts) == 0 {
+			return
+		}
+		key := strings.Join(keyParts, "&")
+		for _, old := range out {
+			oldParts := make([]string, 0, len(old))
+			for k, v := range old {
+				oldParts = append(oldParts, k+"="+v)
+			}
+			if strings.Join(oldParts, "&") == key {
+				return
+			}
+		}
+		out = append(out, m)
+	}
+	add(base)
+	if f.ID != "" {
+		add(map[string]string{"id": f.ID, "fileId": f.ID})
+	}
+	if f.VideoID != "" {
+		add(map[string]string{"id": f.VideoID, "fileId": f.VideoID})
+	}
+	if f.Location != "" {
+		m := cloneStringMap(base)
+		m["location"] = f.Location
+		add(m)
+	}
+	if len(out) == 0 {
+		out = append(out, map[string]string{})
+	}
+	return out
 }
 
 func plasoPlayerURLEncrypt(raw string) string {

@@ -24,5 +24,32 @@
       }
     }
   },
+  "shanxiang_replay_login": {
+    "success": true,
+    "data": {
+      "user": {
+        "token": "hd-token-1"
+      }
+    }
+  },
+  "shanxiang_replay_play": {
+    "success": true,
+    "data": {
+      "video": {
+        "primary": [
+          {
+            "url": "https://cdn.example.com/shanxiang.m3u8",
+            "definition": 720,
+            "desc": "高清"
+          }
+        ]
+      },
+      "audio": [
+        {
+          "url": "https://cdn.example.com/shanxiang.m4a"
+        }
+      ]
+    }
+  },
   "m3u8": "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:5.0,\nhttps://cdn.example.com/shanxiang-1.ts\n"
 }

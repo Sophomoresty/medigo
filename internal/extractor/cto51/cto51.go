@@ -8,6 +8,7 @@ package cto51
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -20,32 +21,35 @@ import (
 )
 
 const (
-	urlStudyCourse       = "https://edu.51cto.com/center/course/user/get-study-course"
-	urlWejobIndex        = "https://edu.51cto.com/center/wejob/user/index?train_id=%s"
-	urlWejobCourse       = "https://edu.51cto.com/center/wejob/user/course?train_id=%s"
-	urlEStudy            = "https://e.51cto.com/study"
-	urlCourse            = "https://edu.51cto.com/course/%s.html"
-	urlLesson            = "https://edu.51cto.com/lesson/%s.html"
-	urlTrainLessonPlay   = "https://edu.51cto.com/center/course/lesson/index?id=%s"
-	urlTrainLiveView     = "https://edu.51cto.com/center/wejob/live/view?id=%s"
-	urlTrainLivePlay     = "https://edu.51cto.com/center/wejob/play/lived?live_id=%s"
-	urlCourseTypeAPI     = "https://edu.51cto.com/center/course/user-june/search-list"
-	urlCourseListAPI     = "https://edu.51cto.com/center/course/user-june/list"
-	urlLessonListAPI     = "https://edu.51cto.com/center/course/user/get-lesson-list"
-	urlLessonFileListAPI = "https://edu.51cto.com/center/course/index/lesson-file-list"
-	urlMaterialListAPI   = "https://edu.51cto.com/center/course/user-june/file-list"
-	urlCourseIndexAPI    = "https://edu.51cto.com/center/course/index/index-api"
-	urlCourseFileListAPI = "https://edu.51cto.com/center/course/index/file-list"
-	urlVodPlayAuthAPI    = "https://edu.51cto.com/center/player/play/vod-play-auth"
-	urlQCloudPlayAPI     = "https://playvideo.qcloud.com/getplayinfo/v4/%s/%s"
-	urlTrainingAPI       = "https://apie.51cto.com/api"
-	urlTrainStageAPI     = "https://edu.51cto.com/center/wejob/user/train-course-stage-ajax"
-	urlTrainCourseAPI    = "https://edu.51cto.com/center/wejob/user/train-course-ajax"
-	urlTrainInfoAPI      = "https://edu.51cto.com/center/wejob/user/course-info-ajax"
-	urlTrainLiveAPI      = "https://edu.51cto.com/center/wejob/user/train-live-ajax"
-	urlTrainFileAPI      = "https://edu.51cto.com/center/wejob/user/train-file-list-ajax"
-	urlTrainNextAPI      = "https://edu.51cto.com/center/wejob/center/next-info"
-	urlOrderListAPI      = "https://edu.51cto.com/center/orders/order/ajax-get-order-list"
+	urlStudyCourse        = "https://edu.51cto.com/center/course/user/get-study-course"
+	urlWejobIndex         = "https://edu.51cto.com/center/wejob/user/index?train_id=%s"
+	urlWejobCourse        = "https://edu.51cto.com/center/wejob/user/course?train_id=%s"
+	urlEStudy             = "https://e.51cto.com/study"
+	urlCourse             = "https://edu.51cto.com/course/%s.html"
+	urlLesson             = "https://edu.51cto.com/lesson/%s.html"
+	urlTrainLessonPlay    = "https://edu.51cto.com/center/course/lesson/index?id=%s"
+	urlTrainLiveView      = "https://edu.51cto.com/center/wejob/live/view?id=%s"
+	urlTrainLivePlay      = "https://edu.51cto.com/center/wejob/play/lived?live_id=%s"
+	urlCourseTypeAPI      = "https://edu.51cto.com/center/course/user-june/search-list"
+	urlCourseListAPI      = "https://edu.51cto.com/center/course/user-june/list"
+	urlLessonListAPI      = "https://edu.51cto.com/center/course/user/get-lesson-list"
+	urlLessonFileListAPI  = "https://edu.51cto.com/center/course/index/lesson-file-list"
+	urlMaterialListAPI    = "https://edu.51cto.com/center/course/user-june/file-list"
+	urlCourseIndexAPI     = "https://edu.51cto.com/center/course/index/index-api"
+	urlCourseFileListAPI  = "https://edu.51cto.com/center/course/index/file-list"
+	urlVodPlayAuthAPI     = "https://edu.51cto.com/center/player/play/vod-play-auth"
+	urlQCloudPlayAPI      = "https://playvideo.qcloud.com/getplayinfo/v4/%s/%s"
+	urlTrainingAPI        = "https://apie.51cto.com/api"
+	urlTrainStageAPI      = "https://edu.51cto.com/center/wejob/user/train-course-stage-ajax"
+	urlTrainCourseAPI     = "https://edu.51cto.com/center/wejob/user/train-course-ajax"
+	urlTrainInfoAPI       = "https://edu.51cto.com/center/wejob/user/course-info-ajax"
+	urlTrainLiveAPI       = "https://edu.51cto.com/center/wejob/user/train-live-ajax"
+	urlTrainFileAPI       = "https://edu.51cto.com/center/wejob/user/train-file-list-ajax"
+	urlTrainNextAPI       = "https://edu.51cto.com/center/wejob/center/next-info"
+	urlOrderListAPI       = "https://edu.51cto.com/center/orders/order/ajax-get-order-list"
+	urlOrderListLegacyAPI = "https://edu.51cto.com/center/orders/order/get-order-list"
+
+	defaultCoursePrice = "999"
 )
 
 var patterns = []string{`(?:[\w-]+\.)?51cto\.com/`}
@@ -78,6 +82,8 @@ var (
 	jsPairRe      = regexp.MustCompile(`(?is)["']?([A-Za-z0-9_]+)["']?\s*:\s*(?:"([^"]*)"|'([^']*)'|([^,\n}]+))`)
 	mediaURLRe    = regexp.MustCompile(`(?i)https?:\\?/\\?/[^"'<>\s]+?\.(?:m3u8|mp4|flv|mp3|m4a|aac|pdf|pptx?|docx?|xlsx?|zip|rar|7z|tar|gz|txt|md)(?:\?[^"'<>\s]*)?`)
 	fileAnchorRe  = regexp.MustCompile(`(?is)<a\b[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>`)
+	priceVarRe    = regexp.MustCompile(`(?i)\bvar\s+(?:course_price|price)\s*=\s*["']?(\d+(?:\.\d+)?)["']?`)
+	rmbPriceRe    = regexp.MustCompile(`￥\s*(\d+(?:\.\d+)?)`)
 )
 
 func (x *Cto51) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.MediaInfo, error) {
@@ -108,6 +114,7 @@ func (x *Cto51) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.
 func resolveCourse(c *util.Client, cid string, h map[string]string, listOnly bool) (*extractor.MediaInfo, error) {
 	payloads := fetchCoursePayloads(c, cid, h)
 	title := firstNonEmpty(courseTitleFromPayloads(payloads), "51cto_"+cid)
+	price := priceFromPayloads(payloads)
 	lessons := lessonsFromPayloads(payloads, lessonContext{CourseID: cid})
 	files := filesFromPayloads(payloads, "material")
 
@@ -117,6 +124,9 @@ func resolveCourse(c *util.Client, cid string, h map[string]string, listOnly boo
 		if body, err := c.GetString(page, h); err == nil {
 			pageBody = body
 			title = firstNonEmpty(extractTitle(body), title)
+			if price == "" {
+				price = extractPriceFromHTML(body)
+			}
 			if len(lessons) == 0 {
 				lessons = append(lessons, parseLessonLinks(body)...)
 			}
@@ -153,7 +163,9 @@ func resolveCourse(c *util.Client, cid string, h map[string]string, listOnly boo
 		return entries[0], nil
 	}
 	if len(entries) > 0 {
-		return &extractor.MediaInfo{Site: "cto51", Title: util.SanitizeFilename(title), Entries: entries, Extra: map[string]any{"course_id": cid}}, nil
+		extra := map[string]any{"course_id": cid, "paid_course_id": cid}
+		extra["price"] = normalizePriceOrDefault(price)
+		return &extractor.MediaInfo{Site: "cto51", Title: util.SanitizeFilename(title), Entries: entries, Extra: extra}, nil
 	}
 	return nil, fmt.Errorf("51cto course %s: no playable lesson/file media", cid)
 }
@@ -198,6 +210,7 @@ func resolveTraining(c *util.Client, r route, h map[string]string, listOnly bool
 	}
 	payloads := fetchTrainingPayloads(c, r, h)
 	title := firstNonEmpty(courseTitleFromPayloads(payloads), "train_"+r.TrainID)
+	price := firstNonEmpty(trainingPriceFromPayloads(payloads, r.TrainID), priceFromPayloads(payloads))
 	lessons := lessonsFromPayloads(payloads, lessonContext{TrainID: r.TrainID, TrainCourseID: r.TrainCourseID, SourceKind: "training"})
 	files := filesFromPayloads(payloads, "material")
 	entries := make([]*extractor.MediaInfo, 0, len(lessons)+len(files))
@@ -221,7 +234,9 @@ func resolveTraining(c *util.Client, r route, h map[string]string, listOnly bool
 		return entries[0], nil
 	}
 	if len(entries) > 0 {
-		return &extractor.MediaInfo{Site: "cto51", Title: util.SanitizeFilename(title), Entries: entries, Extra: map[string]any{"train_id": r.TrainID}}, nil
+		extra := map[string]any{"train_id": r.TrainID, "paid_course_id": "train_" + r.TrainID}
+		extra["price"] = normalizePriceOrDefault(price)
+		return &extractor.MediaInfo{Site: "cto51", Title: util.SanitizeFilename(title), Entries: entries, Extra: extra}, nil
 	}
 	return nil, fmt.Errorf("51cto train %s: no playable media", r.TrainID)
 }
@@ -420,8 +435,16 @@ func resolveAuth(c *util.Client, auth map[string]string, h map[string]string) (m
 			FetchM3U8:       true,
 			RewriteM3U8Keys: true,
 		}
+		opts.ExtraParams = map[string]string{
+			"Channel":       "HTML5",
+			"Format":        "JSON",
+			"PlayConfig":    "{}",
+			"PlayerVersion": "2.32.0",
+			"ReAuthInfo":    "{}",
+			"StreamType":    "video",
+		}
 		if auth["rand"] != "" {
-			opts.ExtraParams = map[string]string{"Rand": auth["rand"]}
+			opts.ExtraParams["Rand"] = auth["rand"]
 		}
 		if info, err := shared.AliyunResolvePlayInfo(c, payload, auth["vod_video_id"], opts); err == nil && info.URL != "" {
 			mediaURL := info.URL
@@ -430,7 +453,21 @@ func resolveAuth(c *util.Client, auth map[string]string, h map[string]string) (m
 				mediaURL = "data:application/vnd.apple.mpegurl;base64," + base64.StdEncoding.EncodeToString([]byte(info.M3U8Text))
 				format = "m3u8"
 			}
-			return media{URL: mediaURL, Format: format}, nil
+			extra := map[string]any{
+				"aliyun_api":   info.APIURL,
+				"source_type":  firstNonEmpty(info.SourceType, map[bool]string{true: "m3u8_text", false: "video_url"}[info.NeedMerge]),
+				"encrypt_type": info.EncryptType,
+			}
+			if auth["rand"] != "" {
+				extra["rand"] = auth["rand"]
+			}
+			if secData := cto51SecDataFromAuth(auth, info.PlayResponse); len(secData) > 0 {
+				extra["m3u8_meta"] = map[string]any{"cryptor": map[string]any{
+					"_lel_cryptor_type": "51cto_pes_aes_ecb",
+					"key":               hex.EncodeToString(secData),
+				}}
+			}
+			return media{URL: mediaURL, Format: format, Size: info.Size, Extra: extra}, nil
 		}
 	}
 
@@ -584,6 +621,12 @@ func authFromMap(m map[string]any) map[string]string {
 		"auth_timeout":      textValue(m, "AuthTimeout", "authTimeout", "auth_timeout"),
 		"formats":           textValue(m, "Formats", "formats"),
 		"rand":              textValue(m, "Rand", "rand"),
+		"seed":              textValue(m, "seed", "Seed"),
+		"plaintext":         textValue(m, "Plaintext", "plaintext", "plainText"),
+		"sec_data":          textValue(m, "secData", "sec_data", "SecData", "securityData", "SecurityData"),
+		"play_domain":       textValue(m, "PlayDomain", "playDomain", "play_domain"),
+		"terminal":          textValue(m, "Terminal", "terminal"),
+		"customer_id":       textValue(m, "CustomerId", "customerId", "customer_id"),
 		"type":              textValue(m, "type", "playid", "play_id"),
 		"lesson_id":         textValue(m, "lesson_id", "lessonId", "lessonID", "lid"),
 		"lesson_type":       textValue(m, "lesson_type", "lessonType", "lessonTypeStr"),

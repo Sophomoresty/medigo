@@ -37,7 +37,11 @@ type Orangevip struct{}
 func (s *Orangevip) Patterns() []string { return patterns }
 
 type lesson struct{ VideoID, RoomID, LiveID, Name string }
-type course struct{ ID, Title string }
+type course struct {
+	ID, Title string
+	Price     float64
+	Purchased bool
+}
 
 type apiResp struct {
 	CourseList        []map[string]any `json:"courseList"`
@@ -83,17 +87,31 @@ func (s *Orangevip) Extract(rawURL string, opts *extractor.ExtractOpts) (*extrac
 	if cid == "" {
 		return nil, fmt.Errorf("orangevip: cannot parse courseModelId from URL and course list is empty")
 	}
-	title := courseTitle(courses, cid)
+	selectedCourse := findCourse(courses, cid)
+	title := selectedCourse.Title
+	price := selectedCourse.Price
+	purchased := selectedCourse.Purchased
 	if title == "" {
-		title = pageTitle(c, h, cid)
+		pageTitle, pagePrice := pageInfo(c, h, cid)
+		title = pageTitle
+		if price == 0 {
+			price = pagePrice
+		}
 	}
 	if title == "" {
 		title = "orangevip_" + cid
 	}
-	chapters, err := fetchCourseInfo(c, h, cid)
+	if orderPrice, ok := fetchOrderPrice(c, h, cid); ok {
+		purchased = true
+		if orderPrice > 0 {
+			price = orderPrice
+		}
+	}
+	chapters, chapterClass, err := fetchCourseInfo(c, h, cid)
 	if err != nil {
 		return nil, fmt.Errorf("orangevip coursePeriod: %w", err)
 	}
+	chapters = orderChaptersLikeWeb(chapters, chapterClass)
 	lessons := parseLessons(chapters)
 	if len(lessons) == 0 {
 		return nil, fmt.Errorf("orangevip: no coursePeriodList lessons in courseChapterList")
@@ -105,20 +123,37 @@ func (s *Orangevip) Extract(rawURL string, opts *extractor.ExtractOpts) (*extrac
 		if token == "" {
 			continue
 		}
-		videoURL, audioURL := resolveBaijiayun(c, h, le, token)
-		if videoURL == "" || seen[videoURL] {
-			continue
+		videoURL, audioURL, docURL := resolveBaijiayun(c, h, le, token)
+		if videoURL != "" && !seen[videoURL] {
+			seen[videoURL] = true
+			format := formatOf(videoURL)
+			st := extractor.Stream{Quality: "best", URLs: []string{videoURL}, Format: format, AudioURL: audioURL, Headers: h}
+			if format == "m3u8" {
+				st.NeedMerge = true
+			}
+			entries = append(entries, &extractor.MediaInfo{Site: "orangevip", Title: clean(fmt.Sprintf("[%d]--%s", i+1, first(le.Name, le.VideoID, le.LiveID))), Streams: map[string]extractor.Stream{"best": st}, Extra: map[string]any{"period_id": le.VideoID, "room_id": le.RoomID, "live_id": le.LiveID}})
 		}
-		seen[videoURL] = true
-		st := extractor.Stream{Quality: "best", URLs: []string{videoURL}, Format: formatOf(videoURL), AudioURL: audioURL, Headers: h}
-		entries = append(entries, &extractor.MediaInfo{Site: "orangevip", Title: clean(fmt.Sprintf("[%d]--%s", i+1, first(le.Name, le.VideoID, le.LiveID))), Streams: map[string]extractor.Stream{"best": st}, Extra: map[string]any{"period_id": le.VideoID, "room_id": le.RoomID, "live_id": le.LiveID}})
+		if audioURL != "" && !seen[audioURL] {
+			seen[audioURL] = true
+			entries = append(entries, urlEntry("orangevip", clean(fmt.Sprintf("[%d]--%s_音频", i+1, first(le.Name, le.VideoID))), audioURL, "audio", h, map[string]any{"period_id": le.VideoID, "kind": "audio"}))
+		}
+		if docURL != "" {
+			for _, entry := range docEntries(c, h, docURL, clean(fmt.Sprintf("[%d]--%s_板书", i+1, first(le.Name, le.VideoID)))) {
+				u := firstEntryURL(entry)
+				if u == "" || seen[u] {
+					continue
+				}
+				seen[u] = true
+				entries = append(entries, entry)
+			}
+		}
 	}
 	files := fetchFiles(c, h, cid, "", 0)
 	entries = append(entries, fileEntries(files, h)...)
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("orangevip: no playable Baijiayun videos or courseware files found")
 	}
-	return &extractor.MediaInfo{Site: "orangevip", Title: clean(title), Entries: entries, Extra: map[string]any{"course_id": cid}}, nil
+	return &extractor.MediaInfo{Site: "orangevip", Title: clean(title), Entries: entries, Extra: compactOrangeExtra(map[string]any{"course_id": cid, "price": price, "purchased": purchased, "login_checked": true})}, nil
 }
 
 func fetchCourses(c *util.Client, h map[string]string) ([]course, error) {
@@ -138,23 +173,23 @@ func fetchCourses(c *util.Client, h map[string]string) ([]course, error) {
 			}
 			id := firstText(it, "guid", "courseModelId")
 			if id != "" {
-				out = append(out, course{ID: id, Title: firstText(it, "courseName", "title", "name")})
+				out = append(out, course{ID: id, Title: firstText(it, "courseName", "title", "name"), Price: orangePrice(firstText(it, "preferencePrice", "currentPrice", "salePrice", "price")), Purchased: true})
 			}
 		}
 	}
 	return out, nil
 }
 
-func fetchCourseInfo(c *util.Client, h map[string]string, cid string) ([]map[string]any, error) {
+func fetchCourseInfo(c *util.Client, h map[string]string, cid string) ([]map[string]any, []map[string]any, error) {
 	body, err := c.PostForm(info_url, map[string]string{"courseModelId": cid}, h)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var resp apiResp
 	if err := json.Unmarshal([]byte(body), &resp); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return resp.CourseChapterList, nil
+	return resp.CourseChapterList, resp.ChapterClass, nil
 }
 
 func parseLessons(chapters []map[string]any) []lesson {
@@ -189,15 +224,28 @@ func fetchToken(c *util.Client, h map[string]string, cid, periodID string) strin
 	return findFirst(v, "token")
 }
 
-func resolveBaijiayun(c *util.Client, h map[string]string, le lesson, token string) (string, string) {
-	var videoURL string
+func resolveBaijiayun(c *util.Client, h map[string]string, le lesson, token string) (string, string, string) {
+	var videoURL, audioURL, docURL string
 	if le.RoomID != "" {
-		if u, err := shared.BaijiayunResolvePlayback(c, le.RoomID, token, h); err == nil {
-			videoURL = u
+		res := fetchBaijiayunResources(c, h, fmt.Sprintf(video_play_url, url.QueryEscape(le.RoomID), url.QueryEscape(token)))
+		videoURL, audioURL, docURL = first(res.VideoURL, res.MP4URL), res.AudioURL, res.DocURL
+		if videoURL == "" {
+			if u, err := shared.BaijiayunResolvePlayback(c, le.RoomID, token, h); err == nil {
+				videoURL = u
+			}
 		}
 	}
 	if le.LiveID != "" {
-		if u, err := shared.BaijiayunResolveVOD(c, le.LiveID, token, h); err == nil && u != "" {
+		res := fetchBaijiayunResources(c, h, fmt.Sprintf(live_play_url, url.QueryEscape(le.LiveID), url.QueryEscape(token)))
+		if first(res.VideoURL, res.MP4URL) != "" {
+			videoURL = first(res.VideoURL, res.MP4URL)
+			if audioURL == "" {
+				audioURL = res.AudioURL
+			}
+			if docURL == "" {
+				docURL = res.DocURL
+			}
+		} else if u, err := shared.BaijiayunResolveVOD(c, le.LiveID, token, h); err == nil && u != "" {
 			videoURL = u
 		}
 	}
@@ -207,7 +255,7 @@ func resolveBaijiayun(c *util.Client, h map[string]string, le lesson, token stri
 			videoURL = findFirstJSONP(body, "video_url", "url", "playback_url")
 		}
 	}
-	return normalizeURL(videoURL), ""
+	return normalizeURL(videoURL), normalizeURL(audioURL), normalizeURL(docURL)
 }
 
 // courseFile mirrors the dict produced by Orangevip_Course._get_file_list:
@@ -315,23 +363,40 @@ func parseCID(rawURL string) string {
 }
 
 func pageTitle(c *util.Client, h map[string]string, cid string) string {
+	title, _ := pageInfo(c, h, cid)
+	return title
+}
+
+func pageInfo(c *util.Client, h map[string]string, cid string) (string, float64) {
 	body, err := c.GetString(fmt.Sprintf(price_url, url.PathEscape(cid)), h)
 	if err != nil {
-		return ""
+		return "", 0
 	}
-	return first(regexGroup(body, `"courseName"\s*:\s*"([^"]+)"`), regexGroup(body, `<title>(.*?)</title>`))
+	title := first(regexGroup(body, `"courseName"\s*:\s*"([^"]+)"`), regexGroup(body, `<title>(.*?)</title>`))
+	price := 0.0
+	for _, pat := range []string{`"preferencePrice"\s*:\s*(\d+\.?\d*)`, `"currentPrice"\s*:\s*(\d+\.?\d*)`, `"salePrice"\s*:\s*(\d+\.?\d*)`, `"price"\s*:\s*(\d+\.?\d*)`} {
+		if s := regexGroup(body, pat); s != "" {
+			price = orangePrice(s)
+			break
+		}
+	}
+	return title, price
 }
 
 func headers() map[string]string {
 	return map[string]string{"Referer": referer, "Origin": referer, "Accept": "application/json, text/plain, */*"}
 }
 func courseTitle(list []course, cid string) string {
+	return findCourse(list, cid).Title
+}
+
+func findCourse(list []course, cid string) course {
 	for _, c := range list {
 		if c.ID == cid {
-			return c.Title
+			return c
 		}
 	}
-	return ""
+	return course{}
 }
 func firstText(m map[string]any, keys ...string) string {
 	for _, k := range keys {
@@ -401,8 +466,30 @@ func normalizeURL(u string) string {
 	return u
 }
 func formatOf(u string) string {
-	if strings.Contains(strings.ToLower(u), ".m3u8") {
+	lower := strings.ToLower(u)
+	switch {
+	case strings.Contains(lower, ".m3u8"):
 		return "m3u8"
+	case strings.Contains(lower, ".mp3") || strings.Contains(lower, ".m4a") || strings.Contains(lower, ".aac"):
+		return "mp3"
+	case strings.Contains(lower, ".pdf"):
+		return "pdf"
+	case strings.Contains(lower, ".pptx"):
+		return "pptx"
+	case strings.Contains(lower, ".ppt"):
+		return "ppt"
+	case strings.Contains(lower, ".docx"):
+		return "docx"
+	case strings.Contains(lower, ".doc"):
+		return "doc"
+	case strings.Contains(lower, ".jpg") || strings.Contains(lower, ".jpeg"):
+		return "jpg"
+	case strings.Contains(lower, ".png"):
+		return "png"
+	case strings.Contains(lower, ".ev1"):
+		return "ev1"
+	case strings.Contains(lower, ".ev2"):
+		return "ev2"
 	}
 	return "mp4"
 }

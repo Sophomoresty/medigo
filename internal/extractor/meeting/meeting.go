@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -23,6 +24,7 @@ const (
 	liveStreamURL       = "https://meeting.tencent.com/wemeet-tapi/liveportal/v2/query_live_stream"
 	liveReplayURL       = "https://meeting.tencent.com/wemeet-tapi/liveportal/v2/query_meeting_room_live_replay_info"
 	shortShareURL       = "https://meeting.tencent.com/%s/%s"
+	batchItemPrice      = 10
 )
 
 var patterns = []string{`meeting\.tencent\.com/`}
@@ -51,9 +53,6 @@ var (
 )
 
 func (m *Meeting) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor.MediaInfo, error) {
-	if opts == nil || opts.Cookies == nil {
-		return nil, fmt.Errorf("meeting.tencent requires login cookies")
-	}
 	items := parseMeetingBatchText(rawURL)
 	if len(items) == 0 {
 		if id, _ := parseID(rawURL); id != "" {
@@ -64,32 +63,56 @@ func (m *Meeting) Extract(rawURL string, opts *extractor.ExtractOpts) (*extracto
 		return nil, fmt.Errorf("cannot parse meeting.tencent id from URL")
 	}
 	c := util.NewClient()
-	c.SetCookieJar(opts.Cookies)
+	loggedIn := false
+	if opts != nil && opts.Cookies != nil {
+		c.SetCookieJar(opts.Cookies)
+		loggedIn = hasMeetingCookies(opts.Cookies)
+	}
 	h := map[string]string{"Referer": referer, "Origin": referer, "Accept": "application/json, text/plain, */*"}
 
-	entries, pageTitle := resolveMeetingBatch(c, items, h)
+	entries, pageTitle, resolvedItems := resolveMeetingBatch(c, items, h)
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("meeting.tencent: no playable origin_video_url/video_url/replay_url_long found")
 	}
+	annotateMeetingPrice(entries, len(items), resolvedItems, loggedIn)
 	if len(entries) == 1 && len(items) == 1 {
 		return entries[0], nil
 	}
-	return &extractor.MediaInfo{Site: "meeting", Title: clean(first(pageTitle, "腾讯会议批量")), Entries: entries}, nil
+	return &extractor.MediaInfo{
+		Site:    "meeting",
+		Title:   clean(first(pageTitle, "腾讯会议批量")),
+		Entries: entries,
+		Extra: map[string]any{
+			"source_items":      len(items),
+			"resolved_items":    resolvedItems,
+			"batch_item_price":  batchItemPrice,
+			"estimated_price":   batchItemPrice * maxInt(1, resolvedItems),
+			"logged_in_hint":    loggedIn,
+			"price_unit":        "学豆",
+			"price_source":      "Meeting_Course.batch_item_price",
+			"requires_login":    !loggedIn,
+			"password_provided": countMeetingPasswords(items),
+		},
+	}, nil
 }
 
-func resolveMeetingBatch(c *util.Client, batch []meetingBatchItem, h map[string]string) ([]*extractor.MediaInfo, string) {
+func resolveMeetingBatch(c *util.Client, batch []meetingBatchItem, h map[string]string) ([]*extractor.MediaInfo, string, int) {
 	entries := make([]*extractor.MediaInfo, 0, len(batch))
 	seen := map[string]bool{}
 	pageTitle := ""
+	resolvedItems := 0
 	for _, item := range batch {
 		id, typ := parseID(item.URL)
 		if id == "" {
 			continue
 		}
 		pwd := first(item.Password, passwordFromURL(item.URL))
-		items, title := resolveMeeting(c, item.URL, id, typ, pwd, h)
+		mediaItems, title := resolveMeeting(c, item.URL, id, typ, pwd, h)
 		pageTitle = first(pageTitle, title, item.Title)
-		for i, it := range items {
+		if len(mediaItems) > 0 {
+			resolvedItems++
+		}
+		for i, it := range mediaItems {
 			u := strings.TrimSpace(it.URL)
 			if u == "" || seen[u] {
 				continue
@@ -99,10 +122,13 @@ func resolveMeetingBatch(c *util.Client, batch []meetingBatchItem, h map[string]
 			if item.Title != "" {
 				title = mergeMeetingBatchTitle(item.Title, title)
 			}
+			if isScreenMeetingItem(it, title) {
+				continue
+			}
 			entries = append(entries, &extractor.MediaInfo{Site: "meeting", Title: title, Streams: map[string]extractor.Stream{"best": {Quality: "best", URLs: []string{u}, Format: formatOf(u), Headers: h}}, Extra: map[string]any{"course_id": first(it.CourseID, id), "kind": it.Kind, "source_url": item.URL}})
 		}
 	}
-	return entries, pageTitle
+	return entries, pageTitle, resolvedItems
 }
 
 func resolveMeeting(c *util.Client, rawURL, id, typ, pwd string, h map[string]string) ([]mediaItem, string) {
@@ -295,4 +321,73 @@ func clean(s string) string {
 		return "腾讯会议录制"
 	}
 	return s
+}
+
+func hasMeetingCookies(jar http.CookieJar) bool {
+	if jar == nil {
+		return false
+	}
+	for _, host := range []string{"meeting.tencent.com", "cloud.tencent.com"} {
+		u := &url.URL{Scheme: "https", Host: host, Path: "/"}
+		for _, cookie := range jar.Cookies(u) {
+			if strings.TrimSpace(cookie.Value) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func annotateMeetingPrice(entries []*extractor.MediaInfo, sourceItems, resolvedItems int, loggedIn bool) {
+	estimated := batchItemPrice * maxInt(1, resolvedItems)
+	for _, entry := range entries {
+		if entry == nil {
+			continue
+		}
+		if entry.Extra == nil {
+			entry.Extra = map[string]any{}
+		}
+		entry.Extra["batch_item_price"] = batchItemPrice
+		entry.Extra["estimated_price"] = estimated
+		entry.Extra["source_items"] = sourceItems
+		entry.Extra["resolved_items"] = resolvedItems
+		entry.Extra["logged_in_hint"] = loggedIn
+		entry.Extra["price_unit"] = "学豆"
+	}
+}
+
+func countMeetingPasswords(items []meetingBatchItem) int {
+	count := 0
+	for _, item := range items {
+		if strings.TrimSpace(item.Password) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func isScreenMeetingItem(item mediaItem, title string) bool {
+	if strings.EqualFold(strings.TrimSpace(item.Kind), "screen") {
+		return true
+	}
+	return isScreenRecordingTitle(title)
+}
+
+func isScreenRecordingTitle(title string) bool {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return false
+	}
+	base, _ := splitTitleExt(title)
+	if m := regexp.MustCompile(`^\[\d{2}\.\d{2}\.\d{2}\]--(?P<base>.*)\([0-9a-fA-F]{4}\)$`).FindStringSubmatch(base); len(m) > 1 {
+		base = m[1]
+	}
+	return regexp.MustCompile(`_屏幕(?:_\d+)?$`).MatchString(base)
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -22,11 +23,11 @@ func collectEpisodes(v any) []episodeNode {
 		case map[string]any:
 			nextTitle := firstNonEmpty(valueString(vv, "title", "name", "episodeTitle", "lessonTitle", "episodeName", "videoName", "video_name", "coursewareName"), title)
 			id := valueString(vv, "id", "episodeId", "episode_id", "episode_id_str", "videoId", "video_id", "contentId")
-			if id != "" && !seen[id] && (hasAny(vv, "episodeId", "episode_id", "episode_id_str", "videoId", "video_id") || hasAny(vv, "mediafile", "mediaFile", "duration", "mediaDuration", "bizType", "biz_type")) {
+			if id != "" && !seen[id] && isEpisodeMap(vv) {
 				seen[id] = true
 				out = append(out, episodeNode{ID: id, Title: nextTitle, Raw: vv})
 			}
-			for _, k := range []string{"episodes", "episodeList", "episodeNodes", "nodes", "lessons", "lessonList", "tasks", "taskList", "items", "list", "children", "syllabus", "contents", "chapters", "chapterList", "units", "unitList", "data"} {
+			for _, k := range treeChildKeys() {
 				if child, ok := vv[k]; ok {
 					walk(child, nextTitle)
 				}
@@ -41,39 +42,201 @@ func collectEpisodes(v any) []episodeNode {
 	return out
 }
 
+func isEpisodeMap(m map[string]any) bool {
+	if hasAny(m, "episodeId", "episode_id", "episode_id_str", "videoId", "video_id") {
+		return true
+	}
+	if hasAny(m, "mediafile", "mediaFile", "duration", "mediaDuration", "bizType", "biz_type") {
+		return true
+	}
+	kind := strings.ToLower(firstNonEmpty(valueString(m, "content_kind", "kind"), valueString(m, "nodeType", "node_type", "type", "contentType", "content_type")))
+	return strings.Contains(kind, "episode") || strings.Contains(kind, "video") || strings.Contains(kind, "live") || strings.Contains(kind, "review")
+}
+
+func treeChildKeys() []string {
+	return []string{
+		"syllabus", "children", "subContent", "subContents", "contents", "contentList",
+		"groups", "groupList", "tabs", "tabList", "columns", "columnList",
+		"subjects", "subjectList", "lectureSets", "lectureSetList",
+		"episodeSets", "episodeSetList", "sets", "setList", "chapters", "chapterList",
+		"units", "unitList", "modules", "moduleList", "sections", "sectionList",
+		"catalogs", "catalogList", "lessons", "lessonList", "tasks", "taskList",
+		"episodes", "episodeList", "episodeNodes", "nodes", "coursewares",
+		"coursewareList", "items", "list", "data",
+	}
+}
+
 func findMediaURL(v any) string {
+	u, _, _ := pickVideoURLFromMeta(v)
+	return u
+}
+
+func pickVideoURLFromMeta(v any) (string, int64, map[string]any) {
+	candidates := collectVideoCandidates(v, "")
+	if len(candidates) == 0 {
+		return "", 0, nil
+	}
+	best := candidates[0]
+	for _, candidate := range candidates[1:] {
+		if candidate.Rank > best.Rank ||
+			(candidate.Rank == best.Rank && candidate.Size > best.Size) ||
+			(candidate.Rank == best.Rank && candidate.Size == best.Size && strings.Contains(strings.ToLower(candidate.URL), "vod.fbstatic.cn")) {
+			best = candidate
+		}
+	}
+	return best.URL, best.Size, best.Raw
+}
+
+func collectVideoCandidates(v any, source string) []fenbiVideoCandidate {
 	v = unwrapData(v)
 	switch x := v.(type) {
+	case string:
+		if s := normalizeURL(x); isMediaURL(s) {
+			return []fenbiVideoCandidate{{URL: s, Rank: videoQualityRank(map[string]any{"url": s}), Source: source}}
+		}
+	case []any:
+		var out []fenbiVideoCandidate
+		for _, child := range x {
+			out = append(out, collectVideoCandidates(child, source)...)
+		}
+		return dedupeVideoCandidates(out)
 	case map[string]any:
-		for _, k := range []string{"url", "mediaUrl", "media_url", "path", "downloadUrl", "download_url", "fileUrl", "file_url", "playUrl", "m3u8"} {
-			if s := normalizeURL(valueString(x, k)); isMediaURL(s) {
-				return s
+		var out []fenbiVideoCandidate
+		for _, k := range []string{"url", "mediaUrl", "media_url", "downloadUrl", "download_url", "path", "playUrl", "m3u8"} {
+			if s := normalizeURL(anyString(x[k])); isMediaURL(s) {
+				raw := cloneMapForExtra(x)
+				raw["url"] = s
+				out = append(out, fenbiVideoCandidate{
+					URL:    s,
+					Size:   normalizeSizeBytes(firstAny(raw, "size", "fileSize", "mediaSize")),
+					Rank:   videoQualityRank(raw),
+					Raw:    raw,
+					Source: firstNonEmpty(source, k),
+				})
 			}
 		}
 		for _, k := range []string{"mediaFiles", "qualities", "mediaList", "mediaSizes", "streamList", "videoList", "definitions", "urls", "files", "list", "streams", "data"} {
 			if child, ok := x[k]; ok {
-				if s := findMediaURL(child); s != "" {
-					return s
-				}
+				out = append(out, collectVideoCandidates(child, k)...)
 			}
 		}
-		for _, child := range x {
-			if s := findMediaURL(child); s != "" {
-				return s
+		if len(out) == 0 {
+			for k, child := range x {
+				out = append(out, collectVideoCandidates(child, k)...)
 			}
 		}
-	case []any:
-		for _, child := range x {
-			if s := findMediaURL(child); s != "" {
-				return s
-			}
+		return dedupeVideoCandidates(out)
+	}
+	return nil
+}
+
+func dedupeVideoCandidates(values []fenbiVideoCandidate) []fenbiVideoCandidate {
+	seen := map[string]bool{}
+	var out []fenbiVideoCandidate
+	for _, item := range values {
+		if item.URL == "" || seen[item.URL] {
+			continue
 		}
-	case string:
-		if s := normalizeURL(x); isMediaURL(s) {
-			return s
+		seen[item.URL] = true
+		out = append(out, item)
+	}
+	return out
+}
+
+func videoQualityRank(m map[string]any) int {
+	if m == nil {
+		return 0
+	}
+	var parts []string
+	for _, key := range []string{"quality", "qualityType", "qualityCode", "qualityDesc", "qualityName", "definition", "definitionId", "definitionType", "definitionName", "clarity", "format", "label", "name", "desc", "type", "typeName", "streamType", "url"} {
+		if value := anyString(m[key]); value != "" {
+			parts = append(parts, value)
 		}
 	}
-	return ""
+	text := strings.Join(parts, " ")
+	low := strings.ToLower(text)
+	rank := 0
+	switch {
+	case strings.Contains(low, "4k") || strings.Contains(low, "2160") || strings.Contains(low, "uhd") || strings.Contains(text, "原画") || strings.Contains(text, "蓝光"):
+		rank = 2160
+	case strings.Contains(low, "1080") || strings.Contains(low, "fhd") || strings.Contains(low, "fullhd") || strings.Contains(text, "超清"):
+		rank = 1080
+	case regexp.MustCompile(`(?i)(^|[^a-z])hd([^a-z]|$)`).MatchString(low) || strings.Contains(low, "720") || strings.Contains(text, "高清"):
+		rank = 720
+	case regexp.MustCompile(`(?i)(^|[^a-z])sd([^a-z]|$)`).MatchString(low) || strings.Contains(low, "480") || strings.Contains(low, "360") || strings.Contains(text, "标清") || strings.Contains(text, "流畅"):
+		rank = 480
+	}
+	if m2 := regexp.MustCompile(`(\d{3,4})\s*[xX*]\s*(\d{3,4})`).FindStringSubmatch(text); len(m2) > 2 {
+		rank = maxInt(rank, toInt(m2[1], 0), toInt(m2[2], 0))
+	}
+	for _, m2 := range regexp.MustCompile(`(?i)(?<!\d)([1-4]\d{2,3})(?:p)?(?!\d)`).FindAllStringSubmatch(text, -1) {
+		if len(m2) > 1 {
+			rank = maxInt(rank, toInt(m2[1], 0))
+		}
+	}
+	rank = maxInt(rank, toInt(firstAny(m, "height", "videoHeight", "h"), 0))
+	rank = rank*1_000_000 + toInt(firstAny(m, "width", "videoWidth", "w"), 0)*1_000 + toInt(firstAny(m, "bitrate", "bitRate", "videoBitrate", "kbps"), 0)
+	return rank
+}
+
+func maxInt(values ...int) int {
+	maxValue := 0
+	for _, value := range values {
+		if value > maxValue {
+			maxValue = value
+		}
+	}
+	return maxValue
+}
+
+func normalizeSizeBytes(v any) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case int:
+		return int64(x)
+	case float64:
+		return int64(x)
+	}
+	s := anyString(v)
+	if s == "" {
+		return 0
+	}
+	re := regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*(gb|g|mb|m|kb|k|bytes?|b)?`)
+	m := re.FindStringSubmatch(s)
+	if len(m) < 2 {
+		return 0
+	}
+	f, err := strconv.ParseFloat(m[1], 64)
+	if err != nil || f <= 0 {
+		return 0
+	}
+	unit := ""
+	if len(m) > 2 {
+		unit = strings.ToLower(m[2])
+	}
+	switch unit {
+	case "gb", "g":
+		f *= 1024 * 1024 * 1024
+	case "mb", "m":
+		f *= 1024 * 1024
+	case "kb", "k":
+		f *= 1024
+	default:
+		if f > 0 && f < 1024*1024 {
+			// Source normalizes ambiguous small numeric values as MB.
+			f *= 1024 * 1024
+		}
+	}
+	return int64(f)
+}
+
+func cloneMapForExtra(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func pickTitle(v any) string {
@@ -98,12 +261,12 @@ func pickTitle(v any) string {
 	return ""
 }
 
-func mediaInfo(title, mediaURL string, headers map[string]string) *extractor.MediaInfo {
+func mediaInfo(title, mediaURL string, size int64, headers map[string]string) *extractor.MediaInfo {
 	format := "mp4"
 	if strings.Contains(strings.ToLower(mediaURL), ".m3u8") || strings.HasPrefix(strings.ToLower(mediaURL), "data:application/vnd.apple.mpegurl") {
 		format = "m3u8"
 	}
-	stream := extractor.Stream{Quality: "best", URLs: []string{mediaURL}, Format: format, Headers: headers}
+	stream := extractor.Stream{Quality: "best", URLs: []string{mediaURL}, Format: format, Size: size, Headers: headers}
 	if format == "m3u8" {
 		stream.NeedMerge = true
 	}
@@ -154,11 +317,8 @@ func fenbiCookieHeader(jar http.CookieJar, rawURLs ...string) string {
 
 func valueString(m map[string]any, keys ...string) string {
 	for _, k := range keys {
-		if v, ok := m[k]; ok && v != nil {
-			s := anyString(v)
-			if s != "" && s != "0" {
-				return s
-			}
+		if s := valueStringAny(m[k]); s != "" {
+			return s
 		}
 	}
 	return ""
@@ -296,6 +456,14 @@ func mergeVideoInfo(dst map[string]any, src any) {
 	switch x := unwrapData(src).(type) {
 	case map[string]any:
 		for _, key := range []string{"prefix", "episode_id", "episodeId", "lecture_id", "lectureId", "content_id", "contentId", "biz_type", "bizType", "biz_id", "bizId", "material_id", "materialId", "note_material_id", "noteMaterialId"} {
+			if _, exists := dst[key]; exists {
+				continue
+			}
+			if value, ok := x[key]; ok && anyString(value) != "" {
+				dst[key] = value
+			}
+		}
+		for _, key := range []string{"title", "name", "episodeTitle", "lectureTitle", "courseTitle", "supportReplay", "support_replay", "replayDataVersion", "replay_data_version", "hasVideo", "playStatus", "play_status"} {
 			if _, exists := dst[key]; exists {
 				continue
 			}
@@ -448,7 +616,21 @@ func bestMaterialURL(candidates []string) string {
 }
 
 func materialName(m map[string]any) string {
-	return firstNonEmpty(valueString(m, "name", "title", "materialName", "material_name", "fileName", "file_name", "coursewareName", "typeName"), "课件")
+	for _, candidate := range []string{
+		valueString(m, "name", "title", "materialName", "material_name", "fileName", "filename", "file_name", "coursewareName", "typeName"),
+		valueString(m, "materialId", "id", "material_id", "fileId", "file_id", "keynoteId", "keynote_id", "noteMaterialId", "note_material_id"),
+		pickURLFromResponse(m),
+	} {
+		base, _ := filenameParts(candidate)
+		if base != "" && !isGenericMaterialName(base) && !isMaterialIDName(base) {
+			return base
+		}
+		cleaned := cleanFileTitle(candidate)
+		if cleaned != "" && !isGenericMaterialName(cleaned) && !isMaterialIDName(cleaned) {
+			return cleaned
+		}
+	}
+	return "课件"
 }
 
 func fileExt(raw string) string {
@@ -471,6 +653,66 @@ func fileExt(raw string) string {
 		return "bin"
 	}
 	return raw
+}
+
+func filenameParts(raw string) (string, string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", ""
+	}
+	if parsed, err := url.Parse(raw); err == nil && (parsed.Scheme != "" || parsed.Host != "") {
+		q := parsed.Query()
+		for _, key := range []string{"filename", "fileName", "downloadFileName", "attname", "name"} {
+			if values, ok := q[key]; ok {
+				for _, value := range values {
+					if base, ext := filenameParts(value); base != "" {
+						return base, ext
+					}
+				}
+			}
+		}
+		raw = parsed.Path
+	}
+	raw, _ = url.QueryUnescape(raw)
+	raw = strings.ReplaceAll(raw, "\\", "/")
+	raw = strings.TrimSpace(path.Base(strings.Split(strings.Split(raw, "?")[0], "#")[0]))
+	if raw == "" || raw == "." || raw == ".." {
+		return "", ""
+	}
+	ext := strings.TrimPrefix(strings.ToLower(path.Ext(raw)), ".")
+	base := raw
+	if ext != "" {
+		base = strings.TrimSuffix(raw, "."+ext)
+	}
+	return cleanFileTitle(base), ext
+}
+
+func cleanFileTitle(title string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return ""
+	}
+	return strings.TrimSpace(regexp.MustCompile(`[?*|<>:"/⁄\\\s]`).ReplaceAllString(title, ""))
+}
+
+func isGenericMaterialName(name string) bool {
+	name = strings.ToLower(cleanFileTitle(name))
+	name = strings.Trim(name, "()[]{}（）【】「」《》")
+	name = regexp.MustCompile(`[\s_\-—–]+`).ReplaceAllString(name, "")
+	if name == "" || regexp.MustCompile(`^\d+$`).MatchString(name) || regexp.MustCompile(`^[0-9a-f]{16,}$`).MatchString(name) {
+		return true
+	}
+	switch name {
+	case "资料", "讲义", "笔记", "课件", "附件", "文件", "教材", "文档", "pdf", "ppt", "pptx", "doc", "docx", "document", "file", "material":
+		return true
+	}
+	return regexp.MustCompile(`^(资料|讲义|笔记|课件|附件|文件|教材|文档)\d*$`).MatchString(name)
+}
+
+func isMaterialIDName(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	name = regexp.MustCompile(`\.[a-zA-Z0-9]{1,8}$`).ReplaceAllString(name, "")
+	return regexp.MustCompile(`^[0-9a-f]{12,}$`).MatchString(name) || regexp.MustCompile(`^\d{12,}$`).MatchString(name)
 }
 
 func isImageExt(ext string) bool {
@@ -522,6 +764,14 @@ func anyString(v any) string {
 	}
 }
 
+func valueStringAny(v any) string {
+	s := anyString(v)
+	if s == "" || s == "0" || s == "<nil>" {
+		return ""
+	}
+	return s
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if strings.TrimSpace(v) != "" {
@@ -529,6 +779,95 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func extractPrice(info any) float64 {
+	switch m := unwrapData(info).(type) {
+	case map[string]any:
+		for _, key := range []string{"payPrice", "promotionPrice", "price", "floorPrice", "topPrice", "originPrice", "salePrice"} {
+			if price := normalizePriceValue(m[key]); price > 0 {
+				return price
+			}
+		}
+	}
+	return 0
+}
+
+func extractPurchased(info any, fallback bool) bool {
+	if m, ok := unwrapData(info).(map[string]any); ok {
+		for _, key := range []string{"paid", "purchased", "hasBought", "hasPurchased", "bought", "joined"} {
+			if value, exists := m[key]; exists {
+				return truthy(value)
+			}
+		}
+	}
+	return fallback
+}
+
+func normalizePriceValue(value any) float64 {
+	switch x := value.(type) {
+	case int:
+		return float64(x)
+	case int64:
+		return float64(x)
+	case float64:
+		if x > 5000 && x == float64(int64(x)) {
+			return x / 100
+		}
+		return x
+	}
+	s := strings.TrimSpace(anyString(value))
+	if s == "" {
+		return 0
+	}
+	m := regexp.MustCompile(`\d+(?:\.\d+)?`).FindString(s)
+	if m == "" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(m, 64)
+	if err != nil {
+		return 0
+	}
+	if f > 5000 && !strings.Contains(m, ".") {
+		f /= 100
+	}
+	return f
+}
+
+func truthy(value any) bool {
+	switch x := value.(type) {
+	case bool:
+		return x
+	case int:
+		return x != 0
+	case int64:
+		return x != 0
+	case float64:
+		return x != 0
+	}
+	switch strings.ToLower(strings.TrimSpace(anyString(value))) {
+	case "", "0", "false", "no", "null", "nil", "未购买", "未开通":
+		return false
+	default:
+		return true
+	}
+}
+
+func applyPaymentExtra(extra map[string]any, info any) {
+	if extra == nil {
+		return
+	}
+	if price := extractPrice(info); price > 0 {
+		extra["price"] = price
+	}
+	if m, ok := unwrapData(info).(map[string]any); ok {
+		for _, key := range []string{"paid", "purchased", "hasBought", "hasPurchased", "bought", "joined"} {
+			if _, exists := m[key]; exists {
+				extra["purchased"] = extractPurchased(m, true)
+				return
+			}
+		}
+	}
 }
 
 // collectEpisodeSetIDs walks a payload tree and collects all episode set IDs

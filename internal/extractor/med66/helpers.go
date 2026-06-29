@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -95,6 +97,41 @@ func uniqueNonEmpty(values ...string) []string {
 	return out
 }
 
+func med66HeadersFromJar(jar http.CookieJar, base map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range base {
+		out[k] = v
+	}
+	if cookie := med66CookieHeader(jar); cookie != "" {
+		out["Cookie"] = cookie
+		out["cookie"] = cookie
+	}
+	return out
+}
+
+func med66CookieHeader(jar http.CookieJar) string {
+	if jar == nil {
+		return ""
+	}
+	seen := map[string]bool{}
+	var parts []string
+	for _, raw := range []string{"https://member.med66.com/", "https://www.med66.com/", "https://elearning.med66.com/", "https://live.cdeledu.com/"} {
+		u, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		for _, ck := range jar.Cookies(u) {
+			key := ck.Name + "=" + ck.Value
+			if key == "=" || seen[ck.Name] {
+				continue
+			}
+			seen[ck.Name] = true
+			parts = append(parts, key)
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
 func cookieValue(jar http.CookieJar, bases []string, name string) string {
 	for _, raw := range bases {
 		u, _ := url.Parse(raw)
@@ -105,4 +142,77 @@ func cookieValue(jar http.CookieJar, bases []string, name string) string {
 		}
 	}
 	return ""
+}
+
+func collectPriceCandidates(v any) []float64 {
+	var out []float64
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case map[string]any:
+			for key, value := range t {
+				low := strings.ToLower(key)
+				if strings.Contains(low, "price") || strings.Contains(low, "needpay") || strings.Contains(low, "money") || strings.Contains(low, "amount") {
+					if f := toFloat(value); f > 0 {
+						out = append(out, f)
+					}
+				}
+				walk(value)
+			}
+		case anyMap:
+			walk(map[string]any(t))
+		case []any:
+			for _, child := range t {
+				walk(child)
+			}
+		}
+	}
+	walk(v)
+	return out
+}
+
+func toFloat(v any) float64 {
+	switch x := v.(type) {
+	case int:
+		return float64(x)
+	case int64:
+		return float64(x)
+	case float64:
+		if x > 5000 && x == float64(int64(x)) {
+			return x / 100
+		}
+		return x
+	case json.Number:
+		f, _ := strconv.ParseFloat(x.String(), 64)
+		if f > 5000 && f == float64(int64(f)) {
+			return f / 100
+		}
+		return f
+	}
+	s := strings.TrimSpace(fmt.Sprint(v))
+	if s == "" || s == "<nil>" {
+		return 0
+	}
+	m := regexp.MustCompile(`\d+(?:\.\d+)?`).FindString(s)
+	if m == "" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(m, 64)
+	if err != nil {
+		return 0
+	}
+	if f > 5000 && !strings.Contains(m, ".") {
+		f /= 100
+	}
+	return f
+}
+
+func normalizeCoursePrice(v float64) float64 {
+	if v <= 0 {
+		return 0
+	}
+	if v > 5000 && v == float64(int64(v)) {
+		return v / 100
+	}
+	return v
 }

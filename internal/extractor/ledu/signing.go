@@ -100,6 +100,8 @@ func decorateLeduHeaders(host, path, method string, params map[string]string, bo
 	host = strings.ToLower(host)
 	method = strings.ToUpper(firstText(method, "GET"))
 	switch {
+	case strings.Contains(host, "classroom-api.ledupeiyou.com") && strings.Contains(path, "/home-pages/"):
+		return leduHomepageHeaders(out)
 	case strings.Contains(host, "app.ledupeiyou.com") && strings.Contains(path, "/backend-service/"):
 		return leduH5Headers(host+path, method, params, body, out, nil)
 	case strings.Contains(host, "app.ledupeiyou.com") && strings.Contains(path, "/wx-aggregation/"):
@@ -249,6 +251,49 @@ func leduH5Headers(rawURL, method string, params map[string]string, body map[str
 		out["Cookie"] = strings.Join(cookieParts, "; ")
 	}
 	out["sign"] = leduHMACSHA1Upper(leduH5AccessKey, leduH5SignPayload(rawURL, method, params, body, out, extraHeaderKeys))
+	return out
+}
+
+func leduHomepageHeaders(headers map[string]string) map[string]string {
+	auth := leduAuthFromHeaders(headers)
+	out := cloneHeaders(headers)
+	if out == nil {
+		out = map[string]string{}
+	}
+	gradeID := firstText(out["stdGrade"], out["gradeId"])
+	for k, v := range map[string]string{
+		"Content-Type":  "application/json;charset=UTF-8",
+		"Accept":        "application/json, text/plain, */*",
+		"User-Agent":    browserUA,
+		"clientTraceId": leduClientTraceID(),
+		"timestamp":     strconv.FormatInt(time.Now().UnixMilli(), 10),
+		"v":             leduH5Version,
+		"clientType":    "9",
+		"gradeId":       gradeID,
+		"stuIdStr":      auth.StudentID,
+		"stuId":         auth.StudentID,
+		"authorization": firstText(auth.Authorization, auth.Token),
+		"Referer":       "https://stu.ledupeiyou.com/",
+		"Origin":        "https://stu.ledupeiyou.com",
+		"Host":          "classroom-api.ledupeiyou.com",
+	} {
+		out[k] = v
+	}
+	if out["Cookie"] == "" {
+		var cookieParts []string
+		for _, kv := range [][2]string{
+			{"LEDU_AUTHORIZATION_PROD", firstText(auth.Authorization, auth.Token)},
+			{"LEDU_STUID_PROD", auth.StudentID},
+			{"LEDU_PUID_PROD", auth.PUID},
+			{"LEDU_OPENID_PROD", auth.OpenID},
+			{"LEDU_UNIONID_PROD", auth.UnionID},
+		} {
+			if kv[1] != "" {
+				cookieParts = append(cookieParts, kv[0]+"="+kv[1])
+			}
+		}
+		out["Cookie"] = strings.Join(cookieParts, "; ")
+	}
 	return out
 }
 
@@ -529,6 +574,15 @@ func leduNonce(length int) string {
 		length = len(s)
 	}
 	return s[:length]
+}
+
+func leduClientTraceID() string {
+	a := leduNonce(8)
+	b := leduNonce(4)
+	c := leduNonce(4)
+	d := leduNonce(4)
+	e := leduNonce(12)
+	return a + "-" + b + "-" + c + "-" + d + "-" + e
 }
 
 func leduTraceID() string {

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Sophomoresty/mediago/internal/extractor"
 	"github.com/Sophomoresty/mediago/internal/util"
@@ -172,6 +173,10 @@ func (s *Xiwang) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 	if co.id == "" {
 		return nil, fmt.Errorf("xiwang course %q not found in course list", cid)
 	}
+	price := 999.0
+	if p, ok := fetchPriceBrand(c, h, b, co); ok {
+		price = p
+	}
 	lessons, err := fetchLessonsBrand(c, h, b, co)
 	if err != nil {
 		return nil, err
@@ -186,7 +191,7 @@ func (s *Xiwang) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 			seen[u] = true
 			entries = append(entries, media(b.referer, firstNonEmpty(l.title, "plan_"+l.id), u, map[string]any{"planId": l.id, "bizId": l.bizID, "stuCouId": co.stuCouID}))
 		}
-		for i, p := range pptImagesBrand(c, h, b, l) {
+		for i, p := range pptImagesBrand(c, h, b, co, l) {
 			if p == "" || seen[p] {
 				continue
 			}
@@ -209,9 +214,9 @@ func (s *Xiwang) Extract(rawURL string, opts *extractor.ExtractOpts) (*extractor
 	}
 
 	if len(entries) == 0 {
-		return nil, fmt.Errorf("xiwang: no playable m3u8/mp4 or PPT URL resolved (board-playback render flow requires binary draw-message decode + cv2/ffmpeg rendering and is not supported as a URL extraction)")
+		return nil, fmt.Errorf("xiwang: no playable m3u8/mp4, PPT, board image, or courseware URL resolved")
 	}
-	return &extractor.MediaInfo{Site: "xiwang", Title: firstNonEmpty(co.title, "xiwang_"+co.id), Entries: entries}, nil
+	return &extractor.MediaInfo{Site: "xiwang", Title: firstNonEmpty(co.title, "xiwang_"+co.id), Entries: entries, Extra: map[string]any{"courseId": co.id, "stuCouId": co.stuCouID, "courseType": co.typ, "price": price, "purchased": true}}, nil
 }
 
 func fetchCoursesBrand(c *util.Client, h map[string]string, b *brandConfig) ([]course, error) {
@@ -259,12 +264,39 @@ func fetchLessonsBrand(c *util.Client, h map[string]string, b *brandConfig, co c
 	return out, nil
 }
 
+func fetchPriceBrand(c *util.Client, h map[string]string, b *brandConfig, co course) (float64, bool) {
+	if b.priceURL == "" || co.id == "" {
+		return 0, false
+	}
+	body, err := c.GetString(fmt.Sprintf(b.priceURL, co.id), h)
+	if err != nil {
+		return 0, false
+	}
+	var root map[string]any
+	if json.Unmarshal([]byte(body), &root) != nil {
+		return 0, false
+	}
+	if data := firstMapKey(root, "data"); data != nil {
+		if priceModule := firstMapKey(data, "priceModule"); priceModule != nil {
+			if p, ok := xiwangNormalizePrice(priceModule["price"]); ok {
+				return p, true
+			}
+		}
+	}
+	for _, node := range mapsUnder(root) {
+		if p, ok := xiwangNormalizePrice(node["price"]); ok {
+			return p, true
+		}
+	}
+	return 0, false
+}
+
 // fetchCoursewareFiles mirrors _get_infos file_dict path: POST to
 // getDatumListByType with {couType, stuCouId}, parse result.data[] into a map
 // of category_name -> [{file_name, file_url}, ...].
 // Each top-level item in result.data has:
 //   - name: category name
-//   - files: list of {name, url, files:[...]}  (one level of nesting)
+//   - files: recursive list of {name, url, files:[...]}
 func fetchCoursewareFiles(c *util.Client, h map[string]string, b *brandConfig, co course) map[string][]coursewareFile {
 	root, err := postJSON(c, b.fileURL, map[string]string{"couType": co.typ, "stuCouId": co.stuCouID}, h)
 	if err != nil {
@@ -280,35 +312,27 @@ func fetchCoursewareFiles(c *util.Client, h map[string]string, b *brandConfig, c
 		if catName == "" {
 			catName = fmt.Sprintf("category_%d", catIdx+1)
 		}
-		files := asList(cat, "files")
 		var entries []coursewareFile
 		fileCounter := 0
-		for _, f := range files {
-			fName := val(f, "name")
-			fURL := val(f, "url")
-			// Top-level file with a direct URL
-			if fURL != "" {
-				fileCounter++
-				label := fmt.Sprintf("(%d.%d)--%s", catIdx+1, fileCounter, fName)
-				entries = append(entries, coursewareFile{name: label, url: normalizeURL(fURL)})
-			}
-			// Nested files inside this entry
-			subFiles := asList(f, "files")
-			for _, sf := range subFiles {
-				sfName := val(sf, "name")
-				sfURL := val(sf, "url")
-				if sfURL != "" {
-					fileCounter++
-					label := fmt.Sprintf("(%d.%d)--%s", catIdx+1, fileCounter, sfName)
-					entries = append(entries, coursewareFile{name: label, url: normalizeURL(sfURL)})
-				}
-			}
-		}
+		appendCoursewareFiles(asList(cat, "files"), catIdx+1, &fileCounter, &entries)
 		if len(entries) > 0 {
 			out[catName] = entries
 		}
 	}
 	return out
+}
+
+func appendCoursewareFiles(files []map[string]any, catIndex int, counter *int, entries *[]coursewareFile) {
+	for _, f := range files {
+		fName := val(f, "name")
+		fURL := val(f, "url")
+		if fURL != "" {
+			*counter = *counter + 1
+			label := fmt.Sprintf("(%d.%d)--%s", catIndex, *counter, fName)
+			*entries = append(*entries, coursewareFile{name: label, url: normalizeURL(fURL)})
+		}
+		appendCoursewareFiles(asList(f, "files"), catIndex, counter, entries)
+	}
 }
 
 // resolveLessonBrand mirrors Xiwang_Course._get_video_url + _download_video:
@@ -318,18 +342,52 @@ func fetchCoursewareFiles(c *util.Client, h map[string]string, b *brandConfig, c
 // real stream through the vodshow (m3u8) endpoint only when the fid is a string
 // containing ".m3u8" or ".mp4" and app_id + liveTypeId are present.
 func resolveLessonBrand(c *util.Client, h map[string]string, b *brandConfig, co course, l lesson) []string {
+	var fallback []string
 	for _, biz := range []string{"3", "2"} {
 		before, video, after := videoURLsForBizBrand(c, h, b, co, l, biz)
 		out := unique(append(append(before, video...), after...))
 		// Source falls back to biz_id=2 only when the main video slot is empty.
-		if len(video) > 0 || len(out) > 0 {
+		if len(video) > 0 {
 			return out
 		}
+		if len(out) > 0 && len(fallback) == 0 {
+			fallback = out
+		}
 	}
-	return nil
+	return fallback
 }
 
 func videoURLsForBizBrand(c *util.Client, h map[string]string, b *brandConfig, co course, l lesson, biz string) (before, video, after []string) {
+	root := fetchXiwangPlayInfoData(c, h, b, co, l, biz)
+	configs := firstMapKey(root, "configs")
+	if configs == nil {
+		return nil, nil, nil
+	}
+	appID := val(configs, "appId")
+	liveType := firstNonEmpty(val(firstMapKey(root, "planInfo"), "liveTypeId"), val(configs, "liveTypeId"))
+	if appID == "" || liveType == "" {
+		before = xiwangDirectMediaURLsForKeys(root, "before")
+		video = xiwangDirectMediaURLsForKeys(root, "video")
+		after = xiwangDirectMediaURLsForKeys(root, "after")
+		return before, video, after
+	}
+	resolveFields := func(keys ...string) []string {
+		var out []string
+		for _, key := range keys {
+			out = append(out, resolveXiwangMediaRef(c, h, b, val(configs, key), appID, liveType)...)
+		}
+		return unique(out)
+	}
+	before = resolveFields("beforeClassFileId", "beforeClassFile", "beforeVideoFile", "beforeFile", "beforeClassVideoFile")
+	video = resolveFields("videoFile", "videoFileId", "videoUrl", "videoURL", "video", "mainVideoFile", "recordFile", "playbackFile", "videoPath")
+	after = resolveFields("afterClassFileId", "afterClassFile", "afterVideoFile", "afterFile", "afterClassVideoFile")
+	before = unique(append(before, xiwangDirectMediaURLsForKeys(root, "before")...))
+	video = unique(append(video, xiwangDirectMediaURLsForKeys(root, "video")...))
+	after = unique(append(after, xiwangDirectMediaURLsForKeys(root, "after")...))
+	return before, video, after
+}
+
+func fetchXiwangPlayInfoData(c *util.Client, h map[string]string, b *brandConfig, co course, l lesson, biz string) map[string]any {
 	api := b.videoPlay
 	if biz != "3" {
 		api = b.livePlay
@@ -341,24 +399,31 @@ func videoURLsForBizBrand(c *util.Client, h map[string]string, b *brandConfig, c
 		"stuCouId":          toInt(co.stuCouID),
 	}, h)
 	if err != nil {
-		return nil, nil, nil
+		return nil
 	}
-	configs := firstMapKey(root, "configs")
-	if configs == nil {
-		return nil, nil, nil
+	return root
+}
+
+func resolveXiwangMediaRef(c *util.Client, h map[string]string, b *brandConfig, ref, appID, liveType string) []string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return nil
 	}
-	appID := val(configs, "appId")
-	liveType := firstNonEmpty(val(firstMapKey(root, "planInfo"), "liveTypeId"), val(configs, "liveTypeId"))
-	if appID == "" || liveType == "" {
-		return nil, nil, nil
-	}
-	resolve := func(fid string) []string {
-		if fid == "" || !(strings.Contains(fid, ".m3u8") || strings.Contains(fid, ".mp4")) {
-			return nil
+	lower := strings.ToLower(ref)
+	if strings.Contains(lower, ".m3u8") || strings.Contains(lower, ".mp4") {
+		if appID != "" && liveType != "" {
+			if urls := m3u8URLsBrand(c, h, b, ref, appID, liveType); len(urls) > 0 {
+				return urls
+			}
 		}
-		return m3u8URLsBrand(c, h, b, fid, appID, liveType)
+		if isHTTPURL(normalizeURL(ref)) {
+			return []string{normalizeURL(ref)}
+		}
 	}
-	return resolve(val(configs, "beforeClassFileId")), resolve(val(configs, "videoFile")), resolve(val(configs, "afterClassFileId"))
+	if isHTTPURL(normalizeURL(ref)) && looksXiwangVideoURL(ref) {
+		return []string{normalizeURL(ref)}
+	}
+	return nil
 }
 
 // m3u8URLsBrand mirrors _get_m3u8_urls: GET the vodshow endpoint and read
@@ -383,34 +448,313 @@ func m3u8URLsBrand(c *util.Client, h map[string]string, b *brandConfig, fid, app
 			}
 		}
 	}
-	return out
-}
-
-// pptImagesBrand mirrors Xiwang_Course._get_ppt_url_list primary path: GET
-// getTeacherNoteListV2 and collect data.picData[].pic_url. The board-playback
-// fallback inside _get_ppt_url_list (play-info -> page image timeline rendering)
-// is part of the cv2/ffmpeg three-screen reconstruction and is intentionally
-// not reproduced here.
-func pptImagesBrand(c *util.Client, h map[string]string, b *brandConfig, l lesson) []string {
-	body, err := c.GetString(fmt.Sprintf(b.pptList, l.id), h)
-	if err != nil {
-		return nil
-	}
-	var root map[string]any
-	if json.Unmarshal([]byte(body), &root) != nil {
-		return nil
-	}
-	data, _ := root["data"].(map[string]any)
-	pics, _ := data["picData"].([]any)
-	out := []string{}
-	for _, p := range pics {
-		if m, ok := p.(map[string]any); ok {
-			if u := strings.TrimSpace(val(m, "pic_url")); u != "" {
+	if len(out) == 0 {
+		for _, m := range mapsUnder(root) {
+			if u := strings.TrimSpace(val(m, "addr")); u != "" {
 				out = append(out, normalizeURL(u))
 			}
 		}
 	}
+	return prioritizeReachableMediaURLs(unique(out), h, b)
+}
+
+// pptImagesBrand mirrors Xiwang_Course._get_ppt_url_list: primary
+// getTeacherNoteListV2 data.picData[].pic_url, then playback metadata board
+// page images for biz_id=3 and biz_id=2.
+func pptImagesBrand(c *util.Client, h map[string]string, b *brandConfig, co course, l lesson) []string {
+	body, err := c.GetString(fmt.Sprintf(b.pptList, l.id), h)
+	out := []string{}
+	if err == nil {
+		var root map[string]any
+		if json.Unmarshal([]byte(body), &root) == nil {
+			data, _ := root["data"].(map[string]any)
+			pics, _ := data["picData"].([]any)
+			for _, p := range pics {
+				if m, ok := p.(map[string]any); ok {
+					if u := strings.TrimSpace(val(m, "pic_url")); u != "" {
+						out = append(out, normalizeURL(u))
+					}
+				}
+			}
+		}
+	}
+	if len(out) > 0 {
+		return unique(out)
+	}
+	for _, biz := range []string{"3", "2"} {
+		playInfo := fetchXiwangPlayInfoData(c, h, b, co, l, biz)
+		if playInfo == nil {
+			continue
+		}
+		out = xiwangPageImageURLList(c, h, b, co, l, playInfo, biz)
+		if len(out) > 0 {
+			return unique(out)
+		}
+	}
 	return out
+}
+
+func xiwangPageImageURLList(c *util.Client, h map[string]string, b *brandConfig, co course, l lesson, playInfo map[string]any, biz string) []string {
+	resources := extractXiwangBoardResources(c, h, b, co, l, playInfo, biz)
+	if len(resources.pages) == 0 {
+		return nil
+	}
+	out := []string{}
+	seen := map[string]bool{}
+	appendPage := func(pageKey string) {
+		page := resources.pages[pageKey]
+		if page == nil {
+			return
+		}
+		u := normalizeURL(val(page, "imgUrl"))
+		if u == "" || seen[u] {
+			return
+		}
+		seen[u] = true
+		out = append(out, u)
+	}
+	for _, item := range resources.timeline {
+		appendPage(item.pageKey)
+	}
+	for _, key := range resources.order {
+		appendPage(key)
+	}
+	return out
+}
+
+type xiwangBoardTimelineItem struct {
+	at      float64
+	pageKey string
+}
+
+type xiwangBoardResources struct {
+	pages    map[string]map[string]any
+	order    []string
+	timeline []xiwangBoardTimelineItem
+}
+
+func extractXiwangBoardResources(c *util.Client, h map[string]string, b *brandConfig, co course, l lesson, playInfo map[string]any, biz string) xiwangBoardResources {
+	metadata := fetchXiwangMetadata(c, h, b, co, l, playInfo, biz)
+	res := xiwangBoardResources{pages: map[string]map[string]any{}}
+	addPage := func(key string, page map[string]any, at float64) {
+		if page == nil {
+			return
+		}
+		img := normalizeURL(firstNonEmpty(val(page, "imgUrl"), val(page, "imgURL"), val(page, "imageUrl"), val(page, "pic_url"), val(page, "url")))
+		if img == "" {
+			return
+		}
+		key = firstNonEmpty(strings.TrimSpace(key), val(page, "dbKey"), val(page, "key"), val(page, "pageId"), img)
+		if _, ok := res.pages[key]; !ok {
+			res.order = append(res.order, key)
+		}
+		copyPage := map[string]any{}
+		for k, v := range page {
+			copyPage[k] = v
+		}
+		copyPage["imgUrl"] = img
+		if copyPage["width"] == nil {
+			copyPage["width"] = 960
+		}
+		if copyPage["height"] == nil {
+			copyPage["height"] = 720
+		}
+		res.pages[key] = copyPage
+		res.timeline = append(res.timeline, xiwangBoardTimelineItem{at: at, pageKey: key})
+	}
+
+	for _, event := range listUnder(metadata, "event") {
+		category := toInt(val(event, "category"))
+		if category != 50 {
+			continue
+		}
+		props := firstMapKey(event, "properties")
+		if props == nil {
+			props = event
+		}
+		addPage(firstNonEmpty(val(props, "dbKey"), val(props, "key"), val(props, "pageId")), props, xiwangFloat(firstNonEmpty(val(event, "beginTime"), val(event, "timeStamp"), val(event, "timestamp"))))
+	}
+	for _, node := range mapsUnder(metadata) {
+		if firstNonEmpty(val(node, "imgUrl"), val(node, "imgURL"), val(node, "imageUrl"), val(node, "pic_url")) != "" {
+			addPage(firstNonEmpty(val(node, "dbKey"), val(node, "key"), val(node, "pageId")), node, xiwangFloat(firstNonEmpty(val(node, "beginTime"), val(node, "timeStamp"), val(node, "timestamp"))))
+		}
+	}
+	for _, node := range mapsUnder(playInfo) {
+		if firstNonEmpty(val(node, "imgUrl"), val(node, "imgURL"), val(node, "imageUrl"), val(node, "pic_url")) != "" {
+			addPage(firstNonEmpty(val(node, "dbKey"), val(node, "key"), val(node, "pageId")), node, xiwangFloat(firstNonEmpty(val(node, "beginTime"), val(node, "timeStamp"), val(node, "timestamp"))))
+		}
+	}
+	sortXiwangTimeline(res.timeline)
+	return res
+}
+
+func fetchXiwangMetadata(c *util.Client, h map[string]string, b *brandConfig, co course, l lesson, playInfo map[string]any, biz string) map[string]any {
+	configs := firstMapKey(playInfo, "configs")
+	urls := firstMapKey(configs, "urls")
+	metadataURL := firstNonEmpty(val(urls, "getMetadataUrl"), val(urls, "getFdMetadataUrl"), xiwangDefaultMetadataURL(b))
+	root, err := postJSONBody(c, metadataURL, map[string]any{
+		"planId":   toInt(l.id),
+		"stuCouId": toInt(co.stuCouID),
+		"bizId":    toInt(biz),
+	}, h)
+	if err != nil {
+		return nil
+	}
+	if stat := val(root, "stat"); stat != "" && toInt(stat) != 1 {
+		return nil
+	}
+	if data := firstMapKey(root, "data"); data != nil {
+		return data
+	}
+	return root
+}
+
+func xiwangDefaultMetadataURL(b *brandConfig) string {
+	if strings.Contains(b.videoPlay, "wen-su.com") {
+		return "https://studentlive.bcc.wen-su.com/v1/student/playback/metadata/get"
+	}
+	return "https://studentlive.bcc.xiwang.com/v1/student/playback/metadata/get"
+}
+
+func xiwangDirectMediaURLsForKeys(root any, slot string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(u string) {
+		u = normalizeURL(u)
+		if !isHTTPURL(u) || !looksXiwangVideoURL(u) || seen[u] {
+			return
+		}
+		seen[u] = true
+		out = append(out, u)
+	}
+	for _, node := range mapsUnder(root) {
+		for k, v := range node {
+			lk := strings.ToLower(k)
+			switch slot {
+			case "before":
+				if !strings.Contains(lk, "before") {
+					continue
+				}
+			case "after":
+				if !strings.Contains(lk, "after") {
+					continue
+				}
+			default:
+				if strings.Contains(lk, "before") || strings.Contains(lk, "after") {
+					continue
+				}
+				if !(strings.Contains(lk, "video") || strings.Contains(lk, "play") || strings.Contains(lk, "m3u8") || strings.Contains(lk, "mp4") || lk == "url" || strings.HasSuffix(lk, "url")) {
+					continue
+				}
+			}
+			collectXiwangStringURLs(v, add)
+		}
+	}
+	return out
+}
+
+func collectXiwangStringURLs(v any, add func(string)) {
+	switch x := v.(type) {
+	case string:
+		add(x)
+	case []any:
+		for _, it := range x {
+			collectXiwangStringURLs(it, add)
+		}
+	case []string:
+		for _, it := range x {
+			add(it)
+		}
+	case map[string]any:
+		for _, it := range x {
+			collectXiwangStringURLs(it, add)
+		}
+	}
+}
+
+func prioritizeReachableMediaURLs(urls []string, h map[string]string, b *brandConfig) []string {
+	if len(urls) < 2 {
+		return urls
+	}
+	for i, u := range urls {
+		if xiwangHeadOK(u, h, b) {
+			if i == 0 {
+				return urls
+			}
+			out := []string{u}
+			out = append(out, urls[:i]...)
+			out = append(out, urls[i+1:]...)
+			return out
+		}
+	}
+	return urls
+}
+
+func xiwangHeadOK(rawURL string, h map[string]string, b *brandConfig) bool {
+	client, err := util.NewHTTPClient(5*time.Second, "")
+	if err != nil {
+		return false
+	}
+	req, err := http.NewRequest("HEAD", rawURL, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Referer", b.referer)
+	for k, v := range h {
+		req.Header.Set(k, v)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 400
+}
+
+func isHTTPURL(u string) bool {
+	return strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") || strings.HasPrefix(u, "//")
+}
+
+func looksXiwangVideoURL(u string) bool {
+	lower := strings.ToLower(u)
+	return strings.Contains(lower, ".m3u8") || strings.Contains(lower, ".mp4")
+}
+
+func xiwangNormalizePrice(value any) (float64, bool) {
+	if value == nil {
+		return 0, false
+	}
+	text := strings.TrimSpace(fmt.Sprint(value))
+	if text == "" || text == "<nil>" {
+		return 0, false
+	}
+	text = strings.NewReplacer(",", "", "￥", "", "¥", "").Replace(text)
+	price, err := strconv.ParseFloat(text, 64)
+	if err != nil {
+		return 0, false
+	}
+	return price, true
+}
+
+func xiwangFloat(value string) float64 {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	f, _ := strconv.ParseFloat(value, 64)
+	return f
+}
+
+func sortXiwangTimeline(items []xiwangBoardTimelineItem) {
+	for i := 1; i < len(items); i++ {
+		cur := items[i]
+		j := i - 1
+		for j >= 0 && items[j].at > cur.at {
+			items[j+1] = items[j]
+			j--
+		}
+		items[j+1] = cur
+	}
 }
 
 func postJSONBody(c *util.Client, api string, data map[string]any, h map[string]string) (map[string]any, error) {

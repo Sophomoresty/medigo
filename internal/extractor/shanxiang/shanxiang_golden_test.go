@@ -170,10 +170,19 @@ func TestExtractMock(t *testing.T) {
 	fixtures := loadFixtures(t)
 	installMockTransport(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Host == "www.sx1211.com" && r.Method == http.MethodGet && r.URL.Path == "/user/course.html":
+			_, _ = w.Write([]byte(`<html><body><span class="js-user-name">mock-user</span><a href="/user/course.html">我的课程</a></body></html>`))
 		case r.Host == "www.sx1211.com" && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/course/study.html"):
 			writeFixture(t, w, fixtures, "study_page")
 		case r.Host == "www.sx1211.com" && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/course/playbackView"):
 			writeFixture(t, w, fixtures, "playback_page")
+		case r.Host == "view.csslcloud.net" && r.Method == http.MethodPost && r.URL.Path == "/replay/user/login":
+			writeFixture(t, w, fixtures, "shanxiang_replay_login")
+		case r.Host == "view.csslcloud.net" && r.Method == http.MethodGet && r.URL.Path == "/replay/video/play":
+			if r.Header.Get("X-HD-Token") == "" {
+				t.Errorf("missing X-HD-Token on replay/video/play")
+			}
+			writeFixture(t, w, fixtures, "shanxiang_replay_play")
 		case r.Host == "view.csslcloud.net" && r.Method == http.MethodPost && r.URL.Path == "/api/room/replay/login":
 			writeFixture(t, w, fixtures, "cssl_login")
 		case r.Host == "view.csslcloud.net" && r.Method == http.MethodGet && r.URL.Path == "/api/record/vod":
@@ -203,7 +212,40 @@ func TestExtractMock(t *testing.T) {
 		t.Fatalf("site=%q", info.Site)
 	}
 	got := firstPlayableURL(info)
-	if !strings.Contains(got, "cdn.example.com/shanxiang.m3u8") {
+	if !strings.Contains(got, "cdn.example.com/shanxiang.m3u8") && !strings.HasPrefix(got, "data:application/vnd.apple.mpegurl") {
 		t.Fatalf("playable URL %q does not contain expected fixture URL", got)
+	}
+}
+
+func TestCourseListPaginationAndPrice(t *testing.T) {
+	installMockTransport(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != "www.sx1211.com" || r.URL.Path != "/User/getAjaxCourseList" {
+			t.Errorf("unexpected request: %s %s%s", r.Method, r.Host, r.URL.String())
+			http.NotFound(w, r)
+			return
+		}
+		page := r.URL.Query().Get("p")
+		switch page {
+		case "1":
+			_, _ = w.Write([]byte(`{"success":"1","data":{"rows":[{"productid":1001,"skuid":2001,"productname":"Course 1","price":"199"}],"totalPages":2,"nextPageIndex":2}}`))
+		case "2":
+			_, _ = w.Write([]byte(`{"success":"1","data":{"rows":[{"productid":1002,"skuId":2002,"name":"Course 2","price":"0"}],"totalPages":2,"nextPageIndex":0}}`))
+		default:
+			t.Fatalf("unexpected page %q", page)
+		}
+	}))
+	c := util.NewClient()
+	courses, err := fetchCourseList(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(courses) != 2 {
+		t.Fatalf("course count=%d, want 2", len(courses))
+	}
+	if courses[0].CourseID != "1001" || courses[0].SKUId != "2001" || courses[0].Price != "199" || courses[0].Purchased {
+		t.Fatalf("course[0]=%#v", courses[0])
+	}
+	if courses[1].CourseID != "1002" || !courses[1].Purchased {
+		t.Fatalf("course[1]=%#v", courses[1])
 	}
 }

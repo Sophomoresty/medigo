@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -74,6 +75,14 @@ func liveType(les lesson) int {
 	}
 	return 1
 }
+
+func lessonRoomID(les lesson) string {
+	if status := toInt(les.LiveStatus); status == 1 || status == 2 {
+		return firstNonEmpty(anyString(les.LiveLessonID), anyString(les.LivePlaybackID))
+	}
+	return firstNonEmpty(anyString(les.LivePlaybackID), anyString(les.LiveLessonID))
+}
+
 func normalizeURL(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if strings.HasPrefix(raw, "//") {
@@ -151,4 +160,54 @@ func pickFormat(u string) string {
 		return "m3u8"
 	}
 	return "mp4"
+}
+
+var lexuePriceNumberRe = regexp.MustCompile(`\d+(?:\.\d+)?`)
+
+func normalizePrice(v any) float64 {
+	if v == nil {
+		return 0
+	}
+	text := strings.TrimSpace(fmt.Sprint(v))
+	if text == "" || text == "<nil>" {
+		return 0
+	}
+	text = strings.NewReplacer(",", "", "¥", "", "￥", "", "元", "").Replace(text)
+	if match := lexuePriceNumberRe.FindString(text); match != "" {
+		text = match
+	}
+	price, err := strconv.ParseFloat(text, 64)
+	if err != nil {
+		return 0
+	}
+	if price >= 1000 && price == float64(int64(price)) {
+		price /= 100
+	}
+	if price < 0 {
+		return 0
+	}
+	return price
+}
+
+func extractPrice(v any) float64 {
+	switch m := v.(type) {
+	case map[string]any:
+		for _, key := range []string{"price", "salePrice", "payPrice", "realPrice", "originPrice", "originalPrice", "amount", "orderPrice", "totalPrice"} {
+			if p := normalizePrice(m[key]); p > 0 {
+				return p
+			}
+		}
+		for _, child := range m {
+			if p := extractPrice(child); p > 0 {
+				return p
+			}
+		}
+	case []any:
+		for _, child := range m {
+			if p := extractPrice(child); p > 0 {
+				return p
+			}
+		}
+	}
+	return 0
 }

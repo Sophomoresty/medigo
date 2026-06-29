@@ -27,6 +27,27 @@ func TestExtractMock(t *testing.T) {
 		t.Fatalf("Extract returned error: %v", err)
 	}
 	goldenAssertMedia(t, "mddclass", got)
+	if len(got.Entries) != 2 {
+		t.Fatalf("Entries length = %d, want 2", len(got.Entries))
+	}
+	foundOCS := false
+	foundFile := false
+	for _, entry := range got.Entries {
+		for key, stream := range entry.Streams {
+			if len(stream.URLs) > 0 && strings.HasPrefix(stream.URLs[0], "data:application/vnd.apple.mpegurl") {
+				foundOCS = true
+			}
+			if key == "file" && stream.Format == "pdf" && len(stream.URLs) > 0 && strings.HasSuffix(stream.URLs[0], "/handout.pdf") {
+				foundFile = true
+			}
+		}
+	}
+	if !foundOCS {
+		t.Fatalf("expected one OCS m3u8 data URL entry: %#v", got.Entries)
+	}
+	if !foundFile {
+		t.Fatalf("expected one file stream entry: %#v", got.Entries)
+	}
 }
 
 func goldenLoadRoutes(t *testing.T) map[string]json.RawMessage {

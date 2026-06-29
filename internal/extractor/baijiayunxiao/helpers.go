@@ -60,7 +60,8 @@ func parseCourseURL(raw string) (courseURL, bool) {
 			domain, cid = m[1], m[2]
 		}
 	}
-	if !strings.Contains(domain, "baijiayunxiao") {
+	isBjyxCourse := strings.EqualFold(q.Get("type"), "bjyx")
+	if !strings.Contains(strings.ToLower(domain), "baijiayunxiao") && !isBjyxCourse {
 		return courseURL{}, false
 	}
 	return courseURL{domain: domain, cid: cid, ctype: ctype}, true
@@ -119,11 +120,12 @@ func collectLessons(nodes []courseNode, prefix []string) []lessonRef {
 }
 
 func mediaInfo(site, title, mediaURL, format string, headers map[string]string) *extractor.MediaInfo {
+	format = strings.ToLower(strings.TrimSpace(format))
 	return &extractor.MediaInfo{
 		Site:  site,
 		Title: title,
 		Streams: map[string]extractor.Stream{
-			"best": {Quality: "best", URLs: []string{mediaURL}, Format: format, Headers: headers},
+			"best": {Quality: "best", URLs: []string{mediaURL}, Format: format, NeedMerge: format == "m3u8", Headers: headers},
 		},
 	}
 }

@@ -2,6 +2,7 @@ package ckjr
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"html"
 	"net/http"
@@ -300,6 +301,187 @@ func ckjrCookieHeader(jar http.CookieJar, rawURL string) string {
 	return strings.Join(parts, "; ")
 }
 
+type ckjrAuthState struct {
+	Token     string
+	UserID    string
+	CompanyID string
+	StoreID   string
+	AESKey    string
+	AESIV     string
+	Headers   map[string]string
+}
+
+func ckjrAuthFromCookies(jar http.CookieJar, rawURL string, route routeInfo) ckjrAuthState {
+	state := ckjrAuthState{Headers: map[string]string{}}
+	if jar == nil {
+		return state
+	}
+	origins := []string{rawURL, route.BaseURL, url0, "https://ckjr001.com/", "https://www.ckjr001.com/"}
+	if route.Company != "" {
+		origins = append(origins, url0+"/kpv2p/"+route.Company+"/")
+	}
+	for _, origin := range origins {
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" {
+			continue
+		}
+		for _, cookie := range jar.Cookies(u) {
+			ckjrMergeAuthCookie(&state, cookie.Name, cookie.Value)
+		}
+	}
+	return state
+}
+
+func ckjrMergeAuthCookie(state *ckjrAuthState, name, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	lowerName := strings.ToLower(strings.TrimSpace(name))
+	switch lowerName {
+	case "token", "ckjr_token", "authorization", "auth", "access_token":
+		if state.Token == "" {
+			state.Token = strings.TrimPrefix(value, "Bearer ")
+		}
+	case "userid", "user_id", "uid":
+		if state.UserID == "" {
+			state.UserID = value
+		}
+	case "companyid", "company_id", "company":
+		if state.CompanyID == "" {
+			state.CompanyID = value
+		}
+	case "x-store-id", "x_store_id", "storeid", "store_id":
+		if state.StoreID == "" {
+			state.StoreID = value
+		}
+	case "aeskey", "aes_key":
+		if state.AESKey == "" {
+			state.AESKey = value
+		}
+	case "aesvi", "aesiv", "aes_iv":
+		if state.AESIV == "" {
+			state.AESIV = value
+		}
+	case "x-dmp", "x_dmp":
+		if state.Headers["X-DMP"] == "" {
+			state.Headers["X-DMP"] = value
+		}
+	}
+	if strings.Contains(value, "{") {
+		ckjrMergeAuthJSON(state, value)
+		return
+	}
+	if decoded, err := url.QueryUnescape(value); err == nil && decoded != value && strings.Contains(decoded, "{") {
+		ckjrMergeAuthJSON(state, decoded)
+		return
+	}
+	if raw, err := base64.StdEncoding.DecodeString(value + strings.Repeat("=", (4-len(value)%4)%4)); err == nil && json.Valid(raw) {
+		ckjrMergeAuthJSON(state, string(raw))
+	}
+}
+
+func ckjrMergeAuthJSON(state *ckjrAuthState, text string) {
+	var payload any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(text)), &payload); err != nil {
+		return
+	}
+	for _, node := range walkMaps(payload) {
+		state.Token = firstNonEmpty(state.Token, textValue(node, "token", "accessToken", "access_token", "authorization", "Authorization"))
+		state.UserID = firstNonEmpty(state.UserID, textValue(node, "userId", "user_id", "uid", "u"))
+		state.CompanyID = firstNonEmpty(state.CompanyID, textValue(node, "companyId", "company_id", "company", "c"))
+		state.StoreID = firstNonEmpty(state.StoreID, textValue(node, "X-STORE-ID", "x-store-id", "x_store_id", "storeId", "store_id"))
+		state.AESKey = firstNonEmpty(state.AESKey, textValue(node, "aesKey", "aes_key"))
+		state.AESIV = firstNonEmpty(state.AESIV, textValue(node, "aesVi", "aesIV", "aes_iv"))
+		for _, k := range []string{"authorization", "Authorization", "X-DMP", "x-dmp", "X-STORE-ID", "x-store-id"} {
+			if v := textValue(node, k); v != "" {
+				switch strings.ToLower(k) {
+				case "authorization":
+					state.Headers["Authorization"] = v
+				case "x-dmp":
+					state.Headers["X-DMP"] = v
+				case "x-store-id":
+					state.Headers["X-STORE-ID"] = v
+				}
+			}
+		}
+	}
+}
+
+func ckjrApplyAuth(headers map[string]string, route *routeInfo, auth ckjrAuthState) {
+	for k, v := range auth.Headers {
+		if strings.TrimSpace(v) != "" && headers[k] == "" {
+			headers[k] = v
+		}
+	}
+	if auth.Token != "" && headers["Authorization"] == "" {
+		if strings.HasPrefix(strings.ToLower(auth.Token), "bearer ") {
+			headers["Authorization"] = auth.Token
+		} else {
+			headers["Authorization"] = "Bearer " + auth.Token
+		}
+	}
+	if auth.StoreID != "" && headers["X-STORE-ID"] == "" {
+		headers["X-STORE-ID"] = auth.StoreID
+	}
+	if route != nil {
+		if route.Company == "" && auth.CompanyID != "" {
+			route.Company = auth.CompanyID
+		}
+		if route.Query == nil {
+			route.Query = map[string]string{}
+		}
+		if auth.CompanyID != "" && route.Query["companyId"] == "" {
+			route.Query["companyId"] = auth.CompanyID
+		}
+		if auth.UserID != "" && route.Query["userId"] == "" {
+			route.Query["userId"] = auth.UserID
+		}
+	}
+	if headers["X-DMP"] == "" && auth.UserID != "" && auth.CompanyID != "" {
+		if routePath := ckjrRoutePath(route); routePath != "" {
+			headers["X-DMP"] = fmt.Sprintf("u=%s&c=%s&url=%s&chl=gxh", auth.UserID, auth.CompanyID, url.QueryEscape(routePath))
+		}
+	}
+}
+
+func ckjrRoutePath(route *routeInfo) string {
+	if route == nil {
+		return ""
+	}
+	if route.RawURL != "" {
+		if i := strings.Index(route.RawURL, "#"); i >= 0 {
+			pathValue := strings.TrimPrefix(route.RawURL[i+1:], "/")
+			if pathValue != "" {
+				return "/" + pathValue
+			}
+		}
+	}
+	if route.ID == "" {
+		return ""
+	}
+	switch route.Kind {
+	case "column":
+		return fmt.Sprintf("/homePage/column/columnDetail?cId=-1&ckFrom=9&extId=%s", route.ID)
+	case "datum":
+		return fmt.Sprintf("/homePage/datum/datumDetail?datumId=%s&ckFrom=8", route.ID)
+	case "livePersonal":
+		return fmt.Sprintf("/homePage/live/livePersonalDetail?liveId=%s&ckFrom=180", route.ID)
+	case "live":
+		return fmt.Sprintf("/homePage/live/liveDetail?liveId=%s&ckFrom=51", route.ID)
+	case "package":
+		return fmt.Sprintf("/homePage/package/packageDetail?combosId=%s", route.ID)
+	case "testPaper":
+		return fmt.Sprintf("/homePage/testPaper/testDetail?testId=%s&ckFrom=125", route.ID)
+	case "voice":
+		return fmt.Sprintf("/homePage/course/voice?courseId=%s&ckFrom=5&extId=-1", route.ID)
+	case "imgText":
+		return fmt.Sprintf("/homePage/course/imgText?courseId=%s&ckFrom=5&extId=-1", route.ID)
+	default:
+		return fmt.Sprintf("/homePage/course/video?courseId=%s&ckFrom=5&extId=-1", route.ID)
+	}
+}
+
 func routeKindFromPath(path, courseKind string) string {
 	if courseKind != "" {
 		return courseKind
@@ -517,7 +699,12 @@ func extractFirst(re *regexp.Regexp, s string) string {
 	if len(m) < 2 {
 		return ""
 	}
-	return strings.TrimSpace(m[1])
+	for _, group := range m[1:] {
+		if strings.TrimSpace(group) != "" {
+			return strings.TrimSpace(group)
+		}
+	}
+	return ""
 }
 
 var ckjrAESKey = []byte("ckjrTheKey!@##@!")

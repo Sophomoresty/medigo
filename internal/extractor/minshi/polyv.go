@@ -92,6 +92,9 @@ func decryptPolyvSecureInfo(videoID string, info map[string]any) map[string]any 
 				return data
 			}
 		}
+		if _, okPaths := data["paths"]; okPaths {
+			return data
+		}
 	}
 	bodyHex := findFirst(info, "body")
 	formattedVID := formatPolyvVID(videoID)
@@ -151,6 +154,20 @@ func polyvHLSList(info map[string]any) []string {
 				}
 			case map[string]any:
 				if u := firstTextMap(v, "url", "m3u8", "hls"); u != "" {
+					out = append(out, u)
+				}
+			}
+		}
+	}
+	if list, ok := info["paths"].([]any); ok {
+		for _, item := range list {
+			switch v := item.(type) {
+			case string:
+				if strings.TrimSpace(v) != "" {
+					out = append(out, strings.TrimSpace(v))
+				}
+			case map[string]any:
+				if u := firstTextMap(v, "url", "m3u8", "hls", "path"); u != "" {
 					out = append(out, u)
 				}
 			}
