@@ -168,40 +168,15 @@ Pull requests welcome. Please ensure `go build ./...`, `go vet ./...`, and `go t
 
 ## Roadmap
 
-### v0.2 — Engine hardening
+Development is tracked via [GitHub Issues](https://github.com/Sophomoresty/mediago/issues). Key milestones:
 
-- [ ] `--download-archive` — skip already-downloaded items via ID file
-- [ ] `--limit-rate` — throttle download speed
-- [ ] `--extract-audio` — post-process to mp3/m4a via ffmpeg
-- [ ] `--playlist-items` — select specific items (e.g. `1-5,8`)
-- [ ] `--verbose` / `--quiet` — log level control
-- [ ] Signal handling (Ctrl-C) — clean up .part files and temp dirs
-- [ ] Retry for single-file downloads (currently only multi-segment retries)
-- [ ] Full context cancellation (m3u8 fetch + key fetch + backoff sleeps)
-- [ ] Config file support (`~/.config/mediago/config`)
-
-### v0.3 — Post-processing & metadata
-
-- [ ] `--embed-subs` — mux subtitles into mp4/mkv
-- [ ] `--embed-thumbnail` — embed cover art
-- [ ] `--write-thumbnail` — save thumbnail separately
-- [ ] `--match-filter` — filter by title/duration/upload date
-- [ ] `--geo-bypass` — region workaround for geo-restricted content
-- [ ] Richer output template variables (`%(id)s`, `%(upload_date)s`, `%(playlist_index)s`)
-
-### v0.4 — Platform expansion
-
-- [ ] Douyin paid content
-- [ ] Kuaishou
-- [ ] Xiaohongshu (RedNote)
-- [ ] WeChat Channels (视频号)
-- [ ] Bilibili bangumi geo-bypass
+- **v0.2** — End-to-end testing for all 92 sites, release binaries, yt-dlp CLI parity (output templates, archive, format selection)
+- **v0.3** — AliyunVoDEncryption full chain, whiteboard/canvas replay rendering, post-processing (subtitle embed, audio extract)
+- **v0.4** — New platforms (Douyin paid, Kuaishou, Xiaohongshu, WeChat Channels), config file support
 
 ## Known issues
 
 - Some sites require login cookies to access paid/premium content — use `--cookies` or `--cookies-from-browser`
-- Whiteboard/canvas replay content (eoffcn, houdu) extracts the video stream only; local rendering is not supported
-- A few sites with client-side decryption (AliyunVoDEncryption) may require additional key negotiation that is not fully automated
 - Rate limiting on some platforms may cause intermittent failures — retry or use `--proxy`
 
 ## Disclaimer
