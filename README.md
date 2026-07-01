@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="assets/banner.png" alt="MediGo" width="600">
+  <img src="assets/banner.png" alt="mediago" width="600">
 </p>
 
 <p align="center">
-  <strong>Media downloader for Chinese internet. 90+ sites, single binary.</strong>
+  <strong>Media downloader for Chinese internet. 92 sites, single binary, written in Go.</strong>
 </p>
 
 <p align="center">
