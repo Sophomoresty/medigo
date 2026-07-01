@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"path"
 	"regexp"
@@ -23,6 +25,13 @@ func mddclassResolveOCSMedia(c *util.Client, sess *mddclassSession, video mddcla
 		format := mddclassStreamFormat(direct)
 		return extractor.Stream{Quality: "best", URLs: []string{direct}, Format: format, NeedMerge: format == "m3u8", Headers: headers}, map[string]any{"mode": "direct_ocs", "courseware_info": coursewareInfo}, true
 	}
+	if stream, extra, ok := mddclassBuildOCSWhiteboardStream(coursewareInfo, coursewareInfo, headers); ok {
+		extra["mode"] = mddclassFirstText(extra["mode"], "board")
+		if coursewareID := mddclassFirstText(coursewareInfo["coursewareId"], coursewareInfo["courseware_id"], coursewareInfo["courseWareId"], coursewareInfo["ocsId"], coursewareInfo["ocs_id"]); coursewareID != "" {
+			extra["courseware_id"] = coursewareID
+		}
+		return stream, extra, true
+	}
 	if c == nil || sess == nil {
 		return extractor.Stream{}, nil, false
 	}
@@ -35,7 +44,7 @@ func mddclassResolveOCSMedia(c *util.Client, sess *mddclassSession, video mddcla
 	}
 	candidates := mddclassOCSEndpoints(coursewareID, coursewareInfo)
 	for _, candidate := range candidates {
-		body, err := c.GetString(candidate, headers)
+		body, err := mddclassFetchOCSBody(c, candidate, headers)
 		if err != nil || strings.TrimSpace(body) == "" {
 			continue
 		}
@@ -43,7 +52,7 @@ func mddclassResolveOCSMedia(c *util.Client, sess *mddclassSession, video mddcla
 		if err := json.Unmarshal([]byte(body), &payload); err != nil {
 			continue
 		}
-		if stream, extra, ok := mddclassBuildOCSStream(payload, coursewareInfo, headers); ok {
+		if stream, extra, ok := mddclassBuildOCSStream(c, candidate, payload, coursewareInfo, headers); ok {
 			extra["mode"] = mddclassFirstText(extra["mode"], "ocs_api")
 			extra["ocs_endpoint"] = candidate
 			extra["courseware_id"] = coursewareID
@@ -51,6 +60,52 @@ func mddclassResolveOCSMedia(c *util.Client, sess *mddclassSession, video mddcla
 		}
 	}
 	return extractor.Stream{}, nil, false
+}
+
+func mddclassFetchOCSBody(c *util.Client, endpoint string, headers map[string]string) (string, error) {
+	if strings.Contains(endpoint, "courseware-ocs.sksight.com") {
+		endpoint = mddclassRewriteOCSCDNHost(endpoint, "r1-ndr.ykt.cbern.com.cn")
+	}
+	body, err := c.GetString(endpoint, headers)
+	if err == nil && strings.TrimSpace(body) != "" {
+		return body, nil
+	}
+	var lastErr error = err
+	for _, host := range []string{"r2-ndr.ykt.cbern.com.cn", "courseware-ocs.sksight.com"} {
+		candidate := mddclassRewriteOCSCDNHost(endpoint, host)
+		if candidate == endpoint {
+			continue
+		}
+		body, err = c.GetString(candidate, headers)
+		if err == nil && strings.TrimSpace(body) != "" {
+			return body, nil
+		}
+		if err != nil {
+			lastErr = err
+		}
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return body, nil
+}
+
+func mddclassRewriteOCSCDNHost(raw, host string) string {
+	if raw == "" || host == "" {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	if !strings.Contains(strings.ToLower(u.Hostname()), "courseware-ocs.sksight.com") && !strings.Contains(strings.ToLower(u.Hostname()), "r1-ndr.ykt.cbern.com.cn") && !strings.Contains(strings.ToLower(u.Hostname()), "r2-ndr.ykt.cbern.com.cn") {
+		return raw
+	}
+	u.Host = host
+	if strings.EqualFold(u.Scheme, "http") {
+		u.Scheme = "https"
+	}
+	return u.String()
 }
 
 func mddclassOCSEndpoints(coursewareID string, coursewareInfo map[string]any) []string {
@@ -116,8 +171,35 @@ func mddclassOCSQueryValues(coursewareInfo map[string]any) map[string]string {
 	return out
 }
 
-func mddclassBuildOCSStream(payload any, coursewareInfo map[string]any, headers map[string]string) (extractor.Stream, map[string]any, bool) {
+func mddclassBuildOCSStream(args ...any) (extractor.Stream, map[string]any, bool) {
+	var c *util.Client
+	var baseURL string
+	var payload any
+	var coursewareInfo map[string]any
+	var headers map[string]string
+	if len(args) == 3 {
+		payload = args[0]
+		coursewareInfo, _ = args[1].(map[string]any)
+		headers, _ = args[2].(map[string]string)
+	} else if len(args) >= 5 {
+		c, _ = args[0].(*util.Client)
+		baseURL, _ = args[1].(string)
+		payload = args[2]
+		coursewareInfo, _ = args[3].(map[string]any)
+		headers, _ = args[4].(map[string]string)
+		_ = c
+		_ = baseURL
+	}
+	if coursewareInfo == nil {
+		coursewareInfo = map[string]any{}
+	}
+	if headers == nil {
+		headers = map[string]string{}
+	}
 	payload = mddclassNormalizeOCSPayload(payload)
+	if stream, extra, ok := mddclassBuildOCSWhiteboardStream(payload, coursewareInfo, headers); ok {
+		return stream, extra, true
+	}
 	if mediaURL := mddclassNormalizeMediaURL(mddclassFindMediaURL(payload)); mediaURL != "" && !mddclassIsPlaceholderURL(mediaURL) {
 		mediaURL = mddclassSignOCSMediaURLWithHeaders(mediaURL, headers)
 		format := mddclassStreamFormat(mediaURL)
@@ -247,6 +329,35 @@ func mddclassCandidateHosts(payload map[string]any) []any {
 		}
 	}
 	return out
+}
+
+func mddclassPreferredOCSMaterialHost(payload any) string {
+	host := ""
+	var walk func(any, int)
+	walk = func(value any, depth int) {
+		if host != "" || value == nil || depth > 6 {
+			return
+		}
+		switch x := value.(type) {
+		case map[string]any:
+			if candidate := mddclassFirstText(mddclassCandidateHosts(x)...); candidate != "" {
+				host = candidate
+				return
+			}
+			for _, nested := range x {
+				walk(nested, depth+1)
+			}
+		case []any:
+			for _, item := range x {
+				walk(item, depth+1)
+			}
+		}
+	}
+	walk(payload, 0)
+	if host == "" {
+		host = mddclassOCSMaterialHost
+	}
+	return strings.TrimRight(host, "/")
 }
 
 func mddclassRewriteM3U8(content, host string, item map[string]any) string {
@@ -429,6 +540,27 @@ func mddclassNormalizeOCSResourceURL(raw string) string {
 	return ""
 }
 
+func mddclassNormalizeOCSResourceURLWithHost(raw, materialHost string) string {
+	raw = mddclassNormalizeMediaURL(raw)
+	raw = strings.TrimSpace(strings.Trim(raw, `"'`))
+	raw = strings.ReplaceAll(raw, `\u0026`, "&")
+	raw = strings.ReplaceAll(raw, `\/`, `/`)
+	raw = strings.ReplaceAll(raw, "&amp;", "&")
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "data:") {
+		return raw
+	}
+	if strings.HasPrefix(raw, "//") {
+		return "https:" + raw
+	}
+	if materialHost == "" {
+		materialHost = mddclassOCSMaterialHost
+	}
+	return strings.TrimRight(materialHost, "/") + "/" + strings.TrimLeft(raw, "/")
+}
+
 func mddclassSignOCSMediaURL(sess *mddclassSession, raw string) string {
 	if sess == nil || raw == "" {
 		return raw
@@ -489,7 +621,61 @@ func mddclassIsOCSURL(raw string) bool {
 	host := strings.ToLower(u.Hostname())
 	return strings.Contains(host, "courseware-ocs") ||
 		strings.Contains(host, "p1-ocs") ||
+		strings.Contains(host, "r1-ndr.ykt.cbern.com.cn") ||
+		strings.Contains(host, "r2-ndr.ykt.cbern.com.cn") ||
 		strings.Contains(host, "sksight.com") && strings.Contains(strings.ToLower(u.Path), "ocs")
+}
+
+func mddclassIsOCSEndpointURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return strings.Contains(host, "courseware-ocs.sksight.com") ||
+		strings.Contains(host, "r1-ndr.ykt.cbern.com.cn") ||
+		strings.Contains(host, "r2-ndr.ykt.cbern.com.cn") ||
+		strings.Contains(host, "courseware-ocs-api.sksight.com")
+}
+
+func mddclassFetchOCSJSON(c *util.Client, raw string, headers map[string]string) (any, string, bool) {
+	if c == nil || raw == "" || !mddclassIsOCSEndpointURL(raw) {
+		return nil, "", false
+	}
+	body, err := mddclassFetchOCSBody(c, raw, headers)
+	if err != nil || strings.TrimSpace(body) == "" {
+		return nil, "", false
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return nil, "", false
+	}
+	return mddclassNormalizeOCSPayload(payload), raw, true
+}
+
+func mddclassHTTPGetBytes(raw string, headers map[string]string) ([]byte, bool) {
+	if raw == "" || strings.HasPrefix(strings.ToLower(raw), "data:") {
+		return nil, false
+	}
+	req, err := http.NewRequest(http.MethodGet, raw, nil)
+	if err != nil {
+		return nil, false
+	}
+	for k, v := range headers {
+		if strings.TrimSpace(k) != "" && strings.TrimSpace(v) != "" {
+			req.Header.Set(k, v)
+		}
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, false
+	}
+	data, err := io.ReadAll(resp.Body)
+	return data, err == nil && len(data) > 0
 }
 
 func mddclassOCSHint(sess *mddclassSession, coursewareInfo map[string]any) string {

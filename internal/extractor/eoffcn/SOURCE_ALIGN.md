@@ -12,6 +12,7 @@
 | Eoffcn_Course.py:46 `lesson_url = 'https://xue.eoffcn.com/api/lesson/detail?lesson_id={lid:}&package_id={cid:}&module_type={m_type:}&system_order={system_order:}'` | `lesson_url` with `%s` | ✓ |
 | Eoffcn_Base.py:118 `https://xue.eoffcn.com/api/check/member` | `check_member_url` | ✓ |
 | Eoffcn_Course.py:47-48 public key / watch demand APIs | `pub_key_url`, `encrypt_url` | ✓ |
+| Eoffcn_Local.py `https://pcvod.offcncloud.com/` + `https://vod-live.offcncloud.com/base/wb1004/wboffcn.js` | `eoffcnBoardReferer`, `eoffcnWbOffcnJSURL`, `eoffcnWbOffcnMemURL` | ✓ |
 
 ## HTTP 调用
 
@@ -25,6 +26,7 @@
 | `_get_lesson_info` line 265 | `resolveLesson` | GET | ✓ |
 | `_get_m3u8_info` line 330 (AES decrypt live_url) | `findMediaURL` + `aesDecryptLiveURL` | - | ✓ |
 | `_get_pub_key` / `_decrypt_video_key` / `_request_watch_demand_data` | `getPubKey` + `requestWatchDemand` | GET public key + RSA-encrypted POST form | ✓ |
+| `_download_eoffcn_board_playback` / pcvod board manifest | `hydrateEoffcnWhiteboardPlayback` / `buildEoffcnWhiteboardManifest` / `buildEoffcnWhiteboardHTML` | GET pcvod API + wboffcn HTML replay | ✓ |
 
 ## AES Decryption
 
@@ -43,11 +45,8 @@
 | lesson `data.video_url` / `data.live_url` | `findMediaURL` keys `video_url`, `live_url` | ✓ |
 | lesson `data.live_url` (AES-encrypted) | `findMediaURL` → `aesDecryptLiveURL` | ✓ |
 | watch demand `data.live_url` | `requestWatchDemand` + `findMediaURL` | ✓ |
+| board API payload: `api_url`, `room_num`, `room_id`, wbx/wbr, page image, font, audio URLs | `extractEoffcnWhiteboardInfo`, `collectEoffcnBoardAssets`, `eoffcnWhiteboardHeaders` | ✓ |
 
 ## 阻塞步骤
 
-| 源码方法 | 状态 | 说明 |
-|---|---|---|
-| `_download_eoffcn_board_playback` board rendering | blocked | requires Eoffcn_Local whiteboard SDK + Edge/Chrome renderer; local tool, not HTTP extraction |
-
-未解析到 `live_url` / `video_url` 且 `requestWatchDemand` 未返回媒体 URL 时返回明确错误, 不返回空 Streams.
+无。`_download_eoffcn_board_playback` 已对齐为 HTML canvas 播放导出: Go 侧预取 `pcvod.offcncloud.com` 白板数据, 归一化 wbx/wbr, 背景图, 字体和音频资源, 并嵌入 `wboffcn.js` 播放器; 对同时存在视频流的课时会附加 `whiteboard` HTML side stream。未解析到 `live_url` / `video_url` 且 `requestWatchDemand` 未返回媒体 URL 时返回明确错误, 不返回空 Streams.

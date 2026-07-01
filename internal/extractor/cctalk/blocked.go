@@ -27,12 +27,12 @@ func asBlocked(err error) (*blockedError, bool) {
 	return nil, false
 }
 
-// boardLocalRenderReason explains why a whiteboard ("board") lesson without a
-// streamable media URL cannot be downloaded. Such lessons ship only the
-// whiteboard XML (normalPage/whiteboard elements + per-stroke draw events) plus
-// separate audio segments; the source player reconstructs the video frame by
-// frame with OpenCV polyline drawing and Windows GDI text, then muxes with
-// ffmpeg. There is no server-side rendered mp4/m3u8 for this case.
+// boardLocalRenderReason explains why a whiteboard ("board") lesson that only
+// exposes a marker, but no retrievable OCS whiteboard XML/events/assets, cannot
+// be exported. The Go extractor supports Cctalk_Local-style normalPage /
+// whiteboard payloads by normalizing them into an HTML canvas replay; this
+// block is only for lessons where the API response does not contain enough
+// board data to build that replay.
 //
 // Source: Cctalk_Local.pyc.1shot.cdc.py
 //   - _download_cctalk_board_playback:3737 (entered only when no streamable
@@ -46,7 +46,7 @@ func asBlocked(err error) (*blockedError, bool) {
 // The m3u8-backed board case is NOT blocked: when the courseware payload
 // carries `m3u8s`, _prefer_v55_board_ocs_info:3223 returns the v55 ocs_info and
 // playback resolves to a normal m3u8 stream (Cctalk_Course :3240, :3214).
-const boardLocalRenderReason = "cctalk 板书课时需要本地 OpenCV 渲染白板笔迹合成视频, 无服务端预渲染视频可下载 (源码 Cctalk_Local.pyc.1shot.cdc.py:2122 cv2 缺失即返回 False, :1514 cv2.polylines 逐笔绘制, :3920 ffmpeg 合成)"
+const boardLocalRenderReason = "cctalk 板书课时未返回可解析的 normalPage/whiteboard XML, 笔迹事件或资源清单, 无法导出 HTML 白板回放; 已支持有 OCS 白板数据的 HTML 播放格式"
 
 // liveReplayUnavailableReason explains why a live lesson has no downloadable
 // media yet. CCtalk live playback reuses the exact same /video/play + OCS
@@ -80,8 +80,9 @@ func blockedEntry(title string, b *blockedError) *extractor.MediaInfo {
 }
 
 // classifyBlocked decides why an item that yielded no playable URL and no
-// resolvable OCS stream is unavailable: a local-render-only whiteboard lesson,
-// an unavailable live replay, or a generic missing-media failure.
+// resolvable OCS stream is unavailable: a board marker without retrievable
+// whiteboard data, an unavailable live replay, or a generic missing-media
+// failure.
 func classifyBlocked(item map[string]any) error {
 	if isBoardItem(item) {
 		return &blockedError{reason: boardLocalRenderReason, playbackType: "board"}

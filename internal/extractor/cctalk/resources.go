@@ -23,7 +23,7 @@ func entriesFromMap(a *apiClient, item map[string]any, fallbackTitle string) []*
 			out = append(out, entry)
 		}
 	}
-	if hasVideoHint(item) || findMediaURL(item) != "" || textValue(extractCoursewareInfo(item), "coursewareId") != "" || hasProviderVideoHint(item) {
+	if hasVideoHint(item) || findMediaURL(item) != "" || textValue(extractCoursewareInfo(item), "coursewareId") != "" || hasProviderVideoHint(item) || isBoardPayload(item) {
 		if entry, err := mediaFromMap(a, item, fallbackTitle); err == nil {
 			out = append(out, entry)
 		} else if b, ok := asBlocked(err); ok {
@@ -34,7 +34,7 @@ func entriesFromMap(a *apiClient, item map[string]any, fallbackTitle string) []*
 }
 
 func hasDownloadableResource(item map[string]any) bool {
-	return hasArticleHint(item) || looksLikeFileInfo(item) || hasVideoHint(item) || hasProviderVideoHint(item) || textValue(extractCoursewareInfo(item), "coursewareId") != ""
+	return hasArticleHint(item) || looksLikeFileInfo(item) || hasVideoHint(item) || hasProviderVideoHint(item) || textValue(extractCoursewareInfo(item), "coursewareId") != "" || isBoardPayload(item)
 }
 
 func hasVideoHint(item map[string]any) bool {

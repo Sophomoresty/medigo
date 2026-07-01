@@ -1,6 +1,12 @@
 package houdu
 
-import "testing"
+import (
+	"encoding/base64"
+	"strings"
+	"testing"
+
+	"github.com/Sophomoresty/mediago/internal/util"
+)
 
 func TestHouduExtractPlaybackMarksWhiteboardMedia(t *testing.T) {
 	x := &hdCtx{token: "mini-token"}
@@ -71,5 +77,26 @@ func TestHouduMediaFromSourcesCopiesStreamExtra(t *testing.T) {
 	}
 	if info.Entries[0].Extra["whiteboard"] != true {
 		t.Fatalf("media extra whiteboard = %#v, want true", info.Entries[0].Extra["whiteboard"])
+	}
+}
+
+func TestHouduMediaFromSourcesRendersWhiteboardDataURL(t *testing.T) {
+	oldProxy := util.DefaultProxy()
+	t.Cleanup(func() { _ = util.SetDefaultProxy(oldProxy) })
+	if err := util.SetDefaultProxy(""); err != nil {
+		t.Fatal(err)
+	}
+	boardXML := `<courseware totalTime="1000"><style width="640" height="480"/><resources><res id="wb1" url="data:application/json;base64,eyJ3aGl0ZUJvYXJkUGVuIjpbeyJkcmF3dGltZSI6MTAwLCJwb2ludHMiOiIwLDAgMTAwLDEwMCIsImNvbG9yIjoiIzAwMDAwMCIsInBlbiI6Mn1dfQ=="/></resources><normalPage number="1" startTime="0" endTime="1000"><elements><whiteboard res="wb1" width="640" height="480"/></elements></normalPage></courseware>`
+	x := &hdCtx{c: util.NewClient(), cookie: "c=v", token: "auth"}
+	info, err := x.mediaFromSources([]hdSource{{Name: "board", URL: "data:text/xml;base64," + base64.StdEncoding.EncodeToString([]byte(boardXML)), Kind: "video", Format: "html", Extra: map[string]any{"whiteboard": true}}})
+	if err != nil {
+		t.Fatalf("mediaFromSources returned error: %v", err)
+	}
+	stream := info.Entries[0].Streams["best"]
+	if stream.Format != "html" || len(stream.URLs) != 1 || !strings.HasPrefix(stream.URLs[0], "data:text/html") {
+		t.Fatalf("best stream = %#v, want rendered html data URL", stream)
+	}
+	if info.Entries[0].Extra["rendered"] != true || info.Entries[0].Extra["event_count"] == nil {
+		t.Fatalf("render metadata missing: %#v", info.Entries[0].Extra)
 	}
 }

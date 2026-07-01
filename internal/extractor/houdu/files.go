@@ -61,8 +61,20 @@ func (x *hdCtx) mediaFromSources(sources []hdSource) (*extractor.MediaInfo, erro
 		fmtv := firstNonEmpty(src.Format, extFormat(src.URL))
 		extra := ensureExtra(src.Extra)
 		extra["kind"] = firstNonEmpty(src.Kind, "video")
+		entryTitle := cleanName(firstNonEmpty(src.Name, src.URL))
+		headers := map[string]string{"Referer": referer, "Cookie": x.cookie, "Authorization": x.token, "User-Agent": USER_AGENT}
 		streamExtra := cloneAnyMap(extra)
-		entries = append(entries, &extractor.MediaInfo{Site: "houdu", Title: cleanName(firstNonEmpty(src.Name, src.URL)), Streams: map[string]extractor.Stream{"best": {Quality: "best", URLs: []string{src.URL}, Format: fmtv, NeedMerge: src.NeedMerge || fmtv == "m3u8", Headers: map[string]string{"Referer": referer, "Cookie": x.cookie, "Authorization": x.token, "User-Agent": USER_AGENT}, Extra: streamExtra}}, Extra: extra})
+		streams := map[string]extractor.Stream{"best": {Quality: "best", URLs: []string{src.URL}, Format: fmtv, NeedMerge: src.NeedMerge || fmtv == "m3u8", Headers: headers, Extra: streamExtra}}
+		if wbStream, wbExtra, ok := x.renderHouduWhiteboard(entryTitle, src); ok {
+			streams["whiteboard"] = wbStream
+			for k, v := range wbExtra {
+				extra[k] = v
+			}
+			if src.Format == "html" || strings.EqualFold(firstNonEmpty(src.Kind, "video"), "whiteboard") {
+				streams["best"] = wbStream
+			}
+		}
+		entries = append(entries, &extractor.MediaInfo{Site: "houdu", Title: entryTitle, Streams: streams, Extra: extra})
 	}
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("houdu: empty media entries")

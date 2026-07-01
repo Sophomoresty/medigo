@@ -332,28 +332,35 @@ func mediaFromMap(a *apiClient, item map[string]any, fallbackTitle string) (*ext
 		ocsHeaders = a.headers
 	}
 	if mediaURL == "" {
+		title := firstNonEmpty(textValue(item, "lessonName", "videoName", "contentName", "title", "name", "subject"), fallbackTitle)
 		if stream, extra, ok := buildEmbeddedOCSStream(item, coursewareInfo); ok {
-			title := firstNonEmpty(textValue(item, "lessonName", "videoName", "contentName", "title", "name", "subject"), fallbackTitle)
 			extra["tenantId"] = firstNonEmpty(textValue(coursewareInfo, "tenantId"), CCTALK_TENANT_ID)
 			extra["courseware_info"] = coursewareInfo
 			extra["playback_type"] = playbackType(item, extra)
 			return &extractor.MediaInfo{Site: "cctalk", Title: util.SanitizeFilename(title), Streams: map[string]extractor.Stream{"best": stream}, Extra: extra}, nil
 		}
-		if hasMeaningfulCoursewareInfo(coursewareInfo) {
+		if entry, ok := cctalkWhiteboardEntryFromPayload(item, coursewareInfo, title, ocsHeadersFor(coursewareInfo), ""); ok {
+			return entry, nil
+		}
+		if a != nil && hasMeaningfulCoursewareInfo(coursewareInfo) {
 			if stream, extra, ok := a.resolveOCSStream(coursewareInfo); ok {
+				extra["tenantId"] = firstNonEmpty(textValue(coursewareInfo, "tenantId"), CCTALK_TENANT_ID)
+				extra["courseware_info"] = coursewareInfo
+				extra["playback_type"] = playbackType(item, extra)
+				return &extractor.MediaInfo{Site: "cctalk", Title: util.SanitizeFilename(title), Streams: map[string]extractor.Stream{"best": stream}, Extra: extra}, nil
+			}
+			if entry, ok := a.resolveOCSWhiteboard(coursewareInfo, title); ok {
+				return entry, nil
+			}
+		}
+		if a != nil {
+			if stream, extra, ok := a.resolveProviderStream(item); ok {
 				title := firstNonEmpty(textValue(item, "lessonName", "videoName", "contentName", "title", "name", "subject"), fallbackTitle)
 				extra["tenantId"] = firstNonEmpty(textValue(coursewareInfo, "tenantId"), CCTALK_TENANT_ID)
 				extra["courseware_info"] = coursewareInfo
 				extra["playback_type"] = playbackType(item, extra)
 				return &extractor.MediaInfo{Site: "cctalk", Title: util.SanitizeFilename(title), Streams: map[string]extractor.Stream{"best": stream}, Extra: extra}, nil
 			}
-		}
-		if stream, extra, ok := a.resolveProviderStream(item); ok {
-			title := firstNonEmpty(textValue(item, "lessonName", "videoName", "contentName", "title", "name", "subject"), fallbackTitle)
-			extra["tenantId"] = firstNonEmpty(textValue(coursewareInfo, "tenantId"), CCTALK_TENANT_ID)
-			extra["courseware_info"] = coursewareInfo
-			extra["playback_type"] = playbackType(item, extra)
-			return &extractor.MediaInfo{Site: "cctalk", Title: util.SanitizeFilename(title), Streams: map[string]extractor.Stream{"best": stream}, Extra: extra}, nil
 		}
 	} else if hasMeaningfulCoursewareInfo(coursewareInfo) {
 		ocsHeaders = ocsHeadersFor(coursewareInfo)

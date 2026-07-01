@@ -17,6 +17,7 @@
 | `_get_group_video_list` (`Cctalk_Course.pyc.1shot.cdc.py:1226-1249`) | `getGroupVideoList` (`cctalk.go:179-184`) | GET | ✓ |
 | `_get_video_play_info` (`Cctalk_Course.pyc.1shot.cdc.py:1782-1859`) | `getVideoPlayInfo` (`cctalk.go:186-197`) | GET + POST | ✓ |
 | OCS `_resolve_ocs_v55` / `_build_ocs_v55_media_result` (`all_decrypted.json` `Cctalk_Base__t3414`, `Cctalk_Base__t3376`) | `resolveOCSStream` / `buildOCSStreamFromPayload` / `rewriteV55M3U8Text` (`ocs.go`) | GET + m3u8 data stream | ✓ |
+| `Cctalk_Local.py` board payload fetch/render (`_extract_cctalk_board_payload`, `_build_cctalk_board_resource_model`, `_render_cctalk_board_video`) | `resolveOCSWhiteboard` / `cctalkWhiteboardEntryFromPayload` + `shared.BuildWhiteboardTimeline` / `shared.WhiteboardPlayableHTML` | GET + HTML canvas replay | ✓ |
 | `_get_article_detail` (`Cctalk_Course.pyc.1shot.cdc.py:2544`) | `getArticleDetail` (`resources.go`) | GET | ✓ |
 
 ## JSON 字段映射
@@ -31,10 +32,11 @@
 | `_extract_courseware_info`: `coursewareInfo/courseWareInfo/ocsInfo/videoInfo/mediaInfo/contentInfo/resourceInfo/playInfo/activityInfo/lessonInfo`, `coursewareId`, `tenantId`, `userSign`, `sourceType/contentType`, media/file URLs | `extractCoursewareInfo` / `collectCoursewareInfo` (`ocs.go`) | ✓ |
 | v55 payload: `m3u8s[].content`, `resourceId/resourceID`, `key`, `iv`, `cdnHosts`, `_lel_cryptor_type=aes_cbc_segment` | `findV55M3U8Item`, `v55KeyLine`, `rewriteV55M3U8Text`; download fallback parses `EXT-X-KEY` AES-128 in `hls.go` | ✓ |
 | board playback classification: `board`, `whiteboard`, `sourceType/contentType/type` | `isBoardPayload` / `playbackType` (`ocs.go`) | ✓ |
+| board XML: `<resources><res>`, `<normalPage>`, `<image>`, `<whiteboard>`; board JSON: `whiteBoardPen/whiteboardPen/pen/events`, points/color/eraseTime/text | `ParseCCTalkWhiteboardXML`, `ParseGenericWhiteboard`, `NormalizeWhiteboardTimeline` (`shared/whiteboard*.go`) | ✓ |
 | `_iter_material_candidates`: `materials/materialList/coursewareList/resourceList/resources/attachments/files/docs` | `iterMaterialCandidates` (`resources.go`) | ✓ |
 | `_build_file_info`: `fileUrl/resourceUrl/materialUrl/attachUrl/downloadUrl/url`, `fileName/resourceName/materialName/attachName`, `fileSize/size/totalSize` | `fileEntry`, `looksLikeFileInfo`, `guessFileExt` (`resources.go`) | ✓ |
 | `_build_article_info` / `_build_article_html`: `articleInfo.articleId/articleName`, body/detail fields, `publishTime`, `viewCount` | `articleEntry`, `buildArticleHTML` (`resources.go`) | ✓ |
 
 ## 阻塞步骤
 
-无。加密 OCS v55 的私有响应解密体在 protected Base 中未给出完整可移植源码; Go 路径覆盖可见 v55 payload 中的 `m3u8s/content/key/iv` 并在下载层执行 AES-128 segment 解密。
+无。加密 OCS v55 的私有响应解密体在 protected Base 中未给出完整可移植源码; Go 路径覆盖可见 v55 payload 中的 `m3u8s/content/key/iv` 并在下载层执行 AES-128 segment 解密。纯 `board` 标记但 API 未返回 normalPage/whiteboard XML, 笔迹事件或资源清单时仍会返回明确 blocked 原因, 因为没有可生成播放回放的数据。

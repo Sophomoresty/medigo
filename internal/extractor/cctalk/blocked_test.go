@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestBoardWithoutM3U8IsBlockedLocalRender(t *testing.T) {
+func TestBoardWithoutPayloadIsBlocked(t *testing.T) {
 	item := map[string]any{
 		"lessonName":   "白板课时",
 		"coursewareId": "cw-board-1",
@@ -22,8 +22,45 @@ func TestBoardWithoutM3U8IsBlockedLocalRender(t *testing.T) {
 	if e.Extra["blocked"] != true || e.Extra["playback_type"] != "board" {
 		t.Fatalf("expected blocked board entry, got Extra=%#v", e.Extra)
 	}
-	if reason, _ := e.Extra["block_reason"].(string); !strings.Contains(reason, "OpenCV") {
-		t.Fatalf("board block reason should cite local OpenCV render, got %q", reason)
+	if reason, _ := e.Extra["block_reason"].(string); !strings.Contains(reason, "白板") || !strings.Contains(reason, "HTML") {
+		t.Fatalf("board block reason should mention missing whiteboard HTML export data, got %q", reason)
+	}
+}
+
+func TestBoardPayloadExportsWhiteboardHTML(t *testing.T) {
+	item := map[string]any{
+		"lessonName": "白板课时(OCS)",
+		"sourceType": "board",
+		"content": `<courseware totalTime="3000">
+			<style width="1024" height="768"/>
+			<resources>
+				<res id="img1" url="/images/page1.png" type="image"/>
+				<res id="wb1" url="/boards/page1.json" type="whiteboard"/>
+			</resources>
+			<normalPage number="1" startTime="0" endTime="3000">
+				<image res="img1"><style x="0" y="0" width="1024" height="768"/></image>
+				<whiteboard res="wb1"><style x="0" y="0" width="1024" height="768"/></whiteboard>
+			</normalPage>
+		</courseware>`,
+		"cdnHosts": []any{"https://cdn.example.com/material"},
+	}
+	entries := entriesFromMap(&apiClient{headers: baseHeaders()}, item, "课时1")
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.Extra["blocked"] == true {
+		t.Fatalf("board payload with whiteboard XML must not be blocked, got Extra=%#v", e.Extra)
+	}
+	wb, ok := e.Streams["whiteboard"]
+	if !ok {
+		t.Fatalf("whiteboard stream missing: %#v", e.Streams)
+	}
+	if wb.Format != "html" || len(wb.URLs) != 1 || !strings.HasPrefix(wb.URLs[0], "data:text/html") {
+		t.Fatalf("whiteboard stream = %#v", wb)
+	}
+	if e.Extra["whiteboard_pages"] != 1 || e.Extra["whiteboard_playable_format"] != "html" {
+		t.Fatalf("whiteboard extra = %#v", e.Extra)
 	}
 }
 

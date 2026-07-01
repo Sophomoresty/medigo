@@ -43,10 +43,10 @@ const (
 	aesKey = "1234567898882222"
 	aesIV  = "8NONwyJtHesysWpM"
 
-	// Whiteboard playback is rendered by the restored Python local player with
-	// wboffcn.js under pcvod.offcncloud.com. Full canvas rendering is browser
-	// work; the extractor keeps the playable media URL when present and exposes
-	// enough metadata for a renderer/downloader to recover the board timeline.
+	// Whiteboard playback is rendered with the same wboffcn.js runtime used by
+	// pcvod.offcncloud.com. The extractor fetches the pcvod board payload when
+	// available, normalizes it into a manifest, and exposes an HTML data stream
+	// that can render the board in a browser/downloader.
 	eoffcnBoardReferer  = "https://pcvod.offcncloud.com/"
 	eoffcnWbOffcnJSURL  = "https://vod-live.offcncloud.com/base/wb1004/wboffcn.js"
 	eoffcnWbOffcnMemURL = "https://vod-live.offcncloud.com/base/wb1004/wboffcn.js.mem"
@@ -243,6 +243,7 @@ func resolveLesson(c *util.Client, headers map[string]string, p eoffcnParams, fa
 		return nil, fmt.Errorf("eoffcn: no live_url/video_url in lesson %s (RSA watch_demand attempted but returned no media)", p.LessonID)
 	}
 	title := util.SanitizeFilename(firstNonEmpty(pickTitle(payload), fallbackTitle, "eoffcn_"+p.LessonID))
+	playback = hydrateEoffcnWhiteboardPlayback(c, headers, title, playback)
 	return mediaInfoWithExtra(title, playback.URL, eoffcnStreamHeaders(headers, playback.URL, playback.Extra), playback.Extra), nil
 }
 
@@ -1128,24 +1129,36 @@ func mediaInfo(title, u string, h map[string]string) *extractor.MediaInfo {
 
 func mediaInfoWithExtra(title, u string, h map[string]string, extra map[string]any) *extractor.MediaInfo {
 	format := eoffcnFormat(u, extra)
+	streams := map[string]extractor.Stream{"best": {
+		Quality:   "best",
+		URLs:      []string{u},
+		Format:    format,
+		NeedMerge: format == "m3u8",
+		Headers:   h,
+		Extra:     cloneExtra(extra),
+	}}
+	if htmlURL := extraString(extra, "whiteboard_html_url"); htmlURL != "" && htmlURL != u {
+		streams["whiteboard"] = extractor.Stream{
+			Quality: "whiteboard",
+			URLs:    []string{htmlURL},
+			Format:  "html",
+			Headers: map[string]string{"Referer": eoffcnBoardReferer},
+			Extra:   cloneExtra(extra),
+		}
+	}
 	return &extractor.MediaInfo{
-		Site:  "eoffcn",
-		Title: title,
-		Streams: map[string]extractor.Stream{"best": {
-			Quality:   "best",
-			URLs:      []string{u},
-			Format:    format,
-			NeedMerge: format == "m3u8",
-			Headers:   h,
-			Extra:     cloneExtra(extra),
-		}},
-		Extra: cloneExtra(extra),
+		Site:    "eoffcn",
+		Title:   title,
+		Streams: streams,
+		Extra:   cloneExtra(extra),
 	}
 }
 
 func eoffcnFormat(u string, extra map[string]any) string {
 	low := strings.ToLower(u)
 	switch {
+	case strings.HasPrefix(low, "data:text/html"):
+		return "html"
 	case strings.Contains(low, ".m3u8"):
 		return "m3u8"
 	case strings.Contains(low, ".flv"):
