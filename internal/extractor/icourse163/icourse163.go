@@ -107,7 +107,7 @@ func (i *ICourse163) Extract(rawURL string, opts *extractor.ExtractOpts) (*extra
 		return extractColumn(c, column)
 	}
 	if ky, ok := parseKaoyanURL(rawURL); ok {
-		return extractKaoyan(c, ky)
+		return extractKaoyan(c, ky, csrfKeyFromJar(opts.Cookies))
 	}
 	if appURLRe.MatchString(rawURL) {
 		return extractAppCourseList(c)
@@ -171,12 +171,22 @@ func (i *ICourse163) Extract(rawURL string, opts *extractor.ExtractOpts) (*extra
 func newClient(jar http.CookieJar) *util.Client {
 	c := util.NewClient()
 	u, _ := url.Parse(referer)
-	jar.SetCookies(u, []*http.Cookie{{
-		Name:   "NTESSTUDYSI",
-		Value:  srckey,
-		Path:   "/",
-		Domain: ".icourse163.org",
-	}})
+	// Only set default NTESSTUDYSI if user doesn't already have one from login
+	hasCSRF := false
+	for _, ck := range jar.Cookies(u) {
+		if ck.Name == "NTESSTUDYSI" && ck.Value != "" {
+			hasCSRF = true
+			break
+		}
+	}
+	if !hasCSRF {
+		jar.SetCookies(u, []*http.Cookie{{
+			Name:   "NTESSTUDYSI",
+			Value:  srckey,
+			Path:   "/",
+			Domain: ".icourse163.org",
+		}})
+	}
 	c.SetCookieJar(jar)
 	return c
 }
@@ -494,4 +504,14 @@ func fetchSignedVideoStream(c *util.Client, signID, contentType, memberID string
 		out.subs = append(out.subs, extractor.Subtitle{Language: s.Lang, URL: s.URL, Format: "srt"})
 	}
 	return out, nil
+}
+
+func csrfKeyFromJar(jar http.CookieJar) string {
+	u, _ := url.Parse(referer)
+	for _, ck := range jar.Cookies(u) {
+		if ck.Name == "NTESSTUDYSI" && ck.Value != "" {
+			return ck.Value
+		}
+	}
+	return srckey
 }

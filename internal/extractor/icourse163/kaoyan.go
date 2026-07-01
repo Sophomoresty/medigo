@@ -54,7 +54,11 @@ func (k kaoyanURLInfo) pageURL() string {
 	}
 }
 
-func extractKaoyan(c *util.Client, ky kaoyanURLInfo) (*extractor.MediaInfo, error) {
+func extractKaoyan(c *util.Client, ky kaoyanURLInfo, csrf ...string) (*extractor.MediaInfo, error) {
+	csrfKey := srckey
+	if len(csrf) > 0 && csrf[0] != "" {
+		csrfKey = csrf[0]
+	}
 	pageURL := ky.pageURL()
 	if pageURL == "" {
 		return nil, fmt.Errorf("cannot parse icourse163 kaoyan URL")
@@ -102,8 +106,8 @@ func extractKaoyan(c *util.Client, ky kaoyanURLInfo) (*extractor.MediaInfo, erro
 	if ky.termID == "" {
 		return nil, fmt.Errorf("cannot find kaoyan termId for course %s", ky.cid)
 	}
-	purchased, payErr := fetchKaoyanPurchased(c, ky.termID)
-	chapters, jsonErr := fetchMocTermJSONChapters(c, ky.termID)
+	purchased, payErr := fetchKaoyanPurchased(c, ky.termID, csrfKey)
+	chapters, jsonErr := fetchMocTermJSONChapters(c, ky.termID, csrfKey)
 	if len(chapters) == 0 && !purchased {
 		if fallback, err := fetchChapters(c, ky.termID); err == nil && len(fallback) > 0 {
 			chapters = fallback
@@ -136,8 +140,8 @@ func extractKaoyan(c *util.Client, ky kaoyanURLInfo) (*extractor.MediaInfo, erro
 	}, nil
 }
 
-func fetchKaoyanPurchased(c *util.Client, termID string) (bool, error) {
-	body, err := c.PostForm(fmt.Sprintf(kaoyanPayURL, srckey), map[string]string{
+func fetchKaoyanPurchased(c *util.Client, termID string, csrfKey string) (bool, error) {
+	body, err := c.PostForm(fmt.Sprintf(kaoyanPayURL, csrfKey), map[string]string{
 		"termId": termID,
 	}, headers())
 	if err != nil {
@@ -154,8 +158,8 @@ func fetchKaoyanPurchased(c *util.Client, termID string) (bool, error) {
 	return strings.TrimSpace(valueString(out.Result.EnrollStatus)) == "0", nil
 }
 
-func fetchMocTermJSONChapters(c *util.Client, termID string) ([]chapter, error) {
-	body, err := c.PostForm(kaoyanNewInfosURL+srckey, map[string]string{
+func fetchMocTermJSONChapters(c *util.Client, termID string, csrfKey string) ([]chapter, error) {
+	body, err := c.PostForm(kaoyanNewInfosURL+csrfKey, map[string]string{
 		"termId": termID,
 	}, headers())
 	if err != nil {

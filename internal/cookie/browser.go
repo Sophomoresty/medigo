@@ -69,16 +69,32 @@ func readCookiesWSL(browser string) ([]*http.Cookie, error) {
 	defer os.Remove(scriptPath)
 
 	winPath := fmt.Sprintf(`C:\Users\%s\AppData\Local\Temp\medigo_cookie_export.py`, user)
-	cmd := exec.Command("python.exe", winPath)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg != "" {
-			return nil, fmt.Errorf("cookie export: %s", firstLine(errMsg))
+
+	// Try multiple Python paths for WSL compatibility
+	var out []byte
+	var lastErr error
+	for _, pyCmd := range []string{"python.exe", "python3.exe", "/mnt/c/Windows/py.exe"} {
+		cmd := exec.Command(pyCmd, winPath)
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		out, lastErr = cmd.Output()
+		if lastErr == nil {
+			break
 		}
-		return nil, fmt.Errorf("Windows Python cookie export failed: %w", err)
+	}
+	if lastErr != nil {
+		// Fallback: use cmd.exe to find Python
+		cmd := exec.Command("cmd.exe", "/c", "python", winPath)
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		out, lastErr = cmd.Output()
+		if lastErr != nil {
+			errMsg := strings.TrimSpace(stderr.String())
+			if errMsg != "" {
+				return nil, fmt.Errorf("cookie export: %s", firstLine(errMsg))
+			}
+			return nil, fmt.Errorf("Windows Python not found. Install Python on Windows or use --cookies with a Netscape cookie file")
+		}
 	}
 
 	return parseCookieJSON(out)
